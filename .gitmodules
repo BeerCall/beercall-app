@@ -1,0 +1,6 @@
+[submodule "beercall-backend"]
+	path = beercall-backend
+	url = https://github.com/Beercall/beercall-backend.git
+[submodule "beercall-frontend"]
+	path = beercall-frontend
+	url = https://github.com/Beercall/beercall-frontend.git

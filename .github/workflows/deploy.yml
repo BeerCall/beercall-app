@@ -1,0 +1,38 @@
+name: Deploy Production
+
+on:
+  # Permet le déclenchement automatique depuis l'autre repo
+  repository_dispatch:
+    types: [trigger-deploy]
+
+  # Permet aussi de lancer manuellement depuis l'onglet Actions
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🚀 Connexion au VPS et déploiement
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /${{ secrets.SSH_USER }}/beercall-app
+            
+            # 1. On annule les modifs locales
+            git reset --hard
+            git checkout .
+            
+            # 2. On met à jour le parent
+            git pull origin main
+            
+            # 3. On force la mise à jour des sous-modules à la DERNIÈRE version
+            git submodule update --init --recursive --remote
+            
+            # 4. On reconstruit avec Docker Compose
+            docker compose up -d --build
+            
+            # 5. On nettoie les anciennes images
+            docker image prune -f

@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # --- DATABASE ---
+  db_beercall:
+    image: postgres:15-alpine
+    container_name: beercall_db
+    restart: always
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    networks:
+      - default
+
+  # --- BACKEND ---
+  backend:
+    build: ./beercall-backend
+    container_name: beercall_backend
+    restart: always
+    depends_on:
+      - db_beercall
+    environment:
+      - PYTHONUNBUFFERED=1
+      # On change l'URL pour pointer vers le container db
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - JWT_SECRET=${JWT_SECRET}
+    volumes:
+      - ./beercall-backend/uploads:/app/uploads
+    expose:
+      - "8000"
+    networks:
+      - default
+  # --- FRONTEND ---
+  frontend:
+    build: ./beercall-frontend
+    container_name: beercall_frontend
+    restart: always
+    expose:
+      - "80"
+    networks:
+      - default
+
+  # --- PROXY INTERNE (Nginx Beer Call) ---
+  nginx_beercall:
+    image: nginx:alpine
+    container_name: beercall_proxy_internal
+    restart: always
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    environment:
+      - VIRTUAL_HOST=beercall.fr
+      - LETSENCRYPT_HOST=beercall.fr
+      - VIRTUAL_PORT=80
+    networks:
+      - proxy-network
+      - default
+    depends_on:
+      - frontend
+      - backend
+
+networks:
+  proxy-network:
+    external: true
+  default:
+    driver: bridge
