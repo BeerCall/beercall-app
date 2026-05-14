@@ -19,7 +19,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /${{ secrets.SSH_USER }}/beercall-app
+            cd $HOME/beercall-app
             
             # 1. On annule les modifs locales
             git reset --hard
