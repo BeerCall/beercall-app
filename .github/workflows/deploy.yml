@@ -35,5 +35,8 @@ jobs:
             # 4. On reconstruit avec Docker Compose
             docker compose up -d --build
             
-            # 5. On nettoie les anciennes images
+            # 5. On force Nginx à recharger sa configuration (applique le fix DNS)
+            docker compose exec -T nginx_beercall nginx -s reload || true
+            
+            # 6. On nettoie les anciennes images
             docker image prune -f
