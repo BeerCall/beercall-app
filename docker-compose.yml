@@ -29,7 +29,7 @@ services:
       db_beercall:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - DATABASE_URL=postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
     command: ["python", "-m", "alembic", "upgrade", "head"]
     networks:
       - default
@@ -47,7 +47,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       # On change l'URL pour pointer vers le container db
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - DATABASE_URL=postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
       - BEERCALL_SECRET_KEY=${BEERCALL_SECRET_KEY:?required}
       - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
     volumes:
