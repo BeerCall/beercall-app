@@ -1,18 +1,17 @@
 name: Deploy Production
 
 on:
-  # Permet le déclenchement automatique depuis l'autre repo
-  repository_dispatch:
-    types: [trigger-deploy]
-
-  # Permet aussi de lancer manuellement depuis l'onglet Actions
+  push:
+    branches:
+      - main
+  # Permet de lancer manuellement depuis l'onglet Actions
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: 🚀 Connexion au VPS et déploiement
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -22,21 +21,33 @@ jobs:
           script: |
             cd $HOME/beercall-app
             
-            # 1. On annule les modifs locales
-            git reset --hard
-            git checkout .
+            # Sauvegarder le SHA précédent pour rollback documenté
+            PREV_SHA=$(git rev-parse HEAD || echo "unknown")
+            echo "SHA précédent pour rollback : $PREV_SHA"
             
-            # 2. On met à jour le parent
-            git pull origin main
+            # Vérifier que le dépôt n'est pas sale avant modification
+            if [ -n "$(git status --porcelain=v2)" ]; then
+              echo "Erreur : le dépôt VPS est sale, modifications locales détectées."
+              exit 1
+            fi
             
-            # 3. On force la mise à jour des sous-modules à la DERNIÈRE version
-            git submodule update --init --recursive --remote
+            # Mettre à jour le parent en récupérant le commit exact
+            git fetch origin
+            git checkout --detach ${{ github.sha }}
             
-            # 4. On reconstruit avec Docker Compose
+            # Mettre à jour les sous-modules exactement sur les SHA épinglés
+            git submodule sync
+            git submodule update --init --recursive
+            
+            # Afficher les trois SHA
+            echo "Parent SHA déployé : $(git rev-parse HEAD)"
+            git submodule status
+            
+            # On reconstruit avec Docker Compose
             docker compose up -d --build
             
-            # 5. On force Nginx à recharger sa configuration (applique le fix DNS)
+            # On force Nginx à recharger sa configuration (applique le fix DNS)
             docker compose exec -T nginx_beercall nginx -s reload || true
             
-            # 6. On nettoie les anciennes images
+            # On nettoie les anciennes images
             docker image prune -f

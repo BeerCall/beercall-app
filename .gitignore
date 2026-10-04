@@ -1,0 +1,5 @@
+.env
+postgres_data/
+secrets/*
+!.gitignore
+!secrets/.gitkeep
