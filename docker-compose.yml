@@ -12,6 +12,24 @@ services:
       - POSTGRES_DB=${DB_NAME}
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  # --- MIGRATIONS ---
+  migrate:
+    build: ./beercall-backend
+    container_name: beercall_migrate
+    depends_on:
+      db_beercall:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+    command: ["python", "-m", "alembic", "upgrade", "head"]
     networks:
       - default
 
@@ -21,7 +39,10 @@ services:
     container_name: beercall_backend
     restart: always
     depends_on:
-      - db_beercall
+      db_beercall:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       - PYTHONUNBUFFERED=1
       # On change l'URL pour pointer vers le container db
@@ -30,10 +51,17 @@ services:
       - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
     volumes:
       - ./beercall-backend/uploads:/app/uploads
+      - ./secrets:/run/secrets:ro
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - default
+
   # --- FRONTEND ---
   frontend:
     build: ./beercall-frontend
@@ -41,6 +69,11 @@ services:
     restart: always
     expose:
       - "80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - default
 
@@ -59,8 +92,15 @@ services:
       - proxy-network
       - default
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   proxy-network:

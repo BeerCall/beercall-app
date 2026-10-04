@@ -62,8 +62,11 @@ Before you begin, ensure you have the following tools installed:
 
     # Secret for backend JWT tokens
     BEERCALL_SECRET_KEY=your_very_long_and_random_secret_key
+    # Leave empty to disable Firebase. Set to /run/secrets/firebase.json to enable it.
     FIREBASE_CREDENTIALS_PATH=
     ```
+
+    To enable Firebase push notifications, place your `firebase.json` credentials file inside the `secrets/` directory, and set `FIREBASE_CREDENTIALS_PATH=/run/secrets/firebase.json` in your `.env` file.
 
 3.  **Launch the application with Docker Compose:**
 
@@ -110,8 +113,8 @@ beercall-app/
     docker-compose logs -f [service_name] # e.g., backend, frontend
     ```
 
--   **Update submodules:**
-    To pull the latest code from the frontend and backend repositories:
+-   **Update submodules to pinned versions:**
+    To sync the frontend and backend submodules to the exact versions pinned in the orchestration repository:
     ```bash
-    git submodule update --remote --merge
+    git submodule update --init --recursive
     ```
