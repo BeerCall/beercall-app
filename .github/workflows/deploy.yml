@@ -25,9 +25,14 @@ jobs:
             PREV_SHA=$(git rev-parse HEAD || echo "unknown")
             echo "SHA précédent pour rollback : $PREV_SHA"
             
-            # Vérifier que le dépôt n'est pas sale avant modification
-            if [ -n "$(git status --porcelain=v2)" ]; then
-              echo "Erreur : le dépôt VPS est sale, modifications locales détectées."
+            # Bootstrap .gitignore since the previous deployment didn't have it
+            git fetch origin main
+            git checkout FETCH_HEAD -- .gitignore 2>/dev/null || true
+
+            # Vérifier que le dépôt n'est pas sale avant modification (en ignorant les erreurs de permission sur les dossiers ignorés)
+            if [ -n "$(git status --porcelain=v2 2>/dev/null)" ]; then
+              echo "Erreur : le dépôt VPS est sale, modifications locales détectées :"
+              git status --porcelain=v2 2>/dev/null
               exit 1
             fi
             
