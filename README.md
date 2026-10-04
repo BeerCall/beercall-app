@@ -61,7 +61,8 @@ Before you begin, ensure you have the following tools installed:
     DB_NAME=beercall_db
 
     # Secret for backend JWT tokens
-    JWT_SECRET=your_very_long_and_random_secret_key
+    BEERCALL_SECRET_KEY=your_very_long_and_random_secret_key
+    FIREBASE_CREDENTIALS_PATH=
     ```
 
 3.  **Launch the application with Docker Compose:**

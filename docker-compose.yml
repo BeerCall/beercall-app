@@ -26,7 +26,8 @@ services:
       - PYTHONUNBUFFERED=1
       # On change l'URL pour pointer vers le container db
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
-      - JWT_SECRET=${JWT_SECRET}
+      - BEERCALL_SECRET_KEY=${BEERCALL_SECRET_KEY:?required}
+      - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
     volumes:
       - ./beercall-backend/uploads:/app/uploads
     expose:
