@@ -1,5 +1,6 @@
 .env
 postgres_data/
 secrets/*
+beercall_dump.sql
 !.gitignore
 !secrets/.gitkeep

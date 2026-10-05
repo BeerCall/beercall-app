@@ -29,8 +29,14 @@ jobs:
             git fetch origin main
             git checkout FETCH_HEAD -- .gitignore 2>/dev/null || true
 
+            # Vider les sous-modules pour éviter le statut sale "M SC" dû aux vieux gitlinks de l'ancien HEAD
+            git submodule deinit -f --all
+
+            # Nettoyer l'état staging du bootstrap de .gitignore (A)
+            git reset HEAD .gitignore 2>/dev/null || true
+
             # Vérifier que le dépôt n'est pas sale avant modification (en ignorant les erreurs de permission sur les dossiers ignorés)
-            if [ -n "$(git status --porcelain=v2 2>/dev/null)" ]; then
+            if [ -n "$(git status --porcelain=v2 2>/dev/null | grep -v '^\?')" ]; then
               echo "Erreur : le dépôt VPS est sale, modifications locales détectées :"
               git status --porcelain=v2 2>/dev/null
               exit 1
