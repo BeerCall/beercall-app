@@ -3,10 +3,14 @@ name: beercall-e2e
 volumes:
   uploads_e2e:
 
+x-backend-build: &backend_build
+  context: ./beercall-backend
+  args:
+    PYTHON_IMAGE: ${BEERCALL_E2E_PYTHON_IMAGE:-python:3.13-slim}
+
 services:
   migrate_e2e:
-    build:
-      context: ./beercall-backend
+    build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
     depends_on:
@@ -29,8 +33,7 @@ services:
       retries: 5
 
   backend_e2e:
-    build:
-      context: ./beercall-backend
+    build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -50,8 +53,7 @@ services:
       uvicorn main:app --host 0.0.0.0 --port 8000
 
   beer_worker_e2e:
-    build:
-      context: ./beercall-backend
+    build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -65,8 +67,7 @@ services:
     command: python -m workers.beer_call_worker
 
   beer_worker_e2e_2:
-    build:
-      context: ./beercall-backend
+    build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -80,8 +81,7 @@ services:
     command: python -m workers.beer_call_worker
 
   daily_worker_e2e:
-    build:
-      context: ./beercall-backend
+    build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
     depends_on:
@@ -90,13 +90,17 @@ services:
     command: python -m workers.daily_checks
 
   frontend_e2e:
-    build: ./beercall-frontend
+    build:
+      context: ./beercall-frontend
+      args:
+        NODE_IMAGE: ${BEERCALL_E2E_NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${BEERCALL_E2E_NGINX_IMAGE:-nginx:stable-alpine}
     networks:
       default:
         aliases: [frontend]
 
   proxy_e2e:
-    image: nginx:alpine
+    image: ${BEERCALL_E2E_PROXY_IMAGE:-nginx:alpine}
     ports:
       - "8080:80"
     volumes:

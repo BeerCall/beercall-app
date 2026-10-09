@@ -27,6 +27,10 @@ jobs:
       DB_PASSWORD: ci_only_password
       DB_NAME: beercall_test
       BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
+      BEERCALL_E2E_PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.13-slim
+      BEERCALL_E2E_NODE_IMAGE: public.ecr.aws/docker/library/node:22-alpine
+      BEERCALL_E2E_NGINX_IMAGE: public.ecr.aws/docker/library/nginx:stable-alpine
+      BEERCALL_E2E_PROXY_IMAGE: public.ecr.aws/docker/library/nginx:alpine
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,8 +40,11 @@ jobs:
           python-version: '3.13'
       - name: Prepare isolated test keys
         run: |
-          echo "BEERCALL_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
-          echo "BEERCALL_E2E_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          for name in BEERCALL_SECRET_KEY BEERCALL_E2E_SECRET_KEY; do
+            value=$(openssl rand -hex 32)
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
       - name: Validate gitlinks and Compose
         run: |
           git submodule status

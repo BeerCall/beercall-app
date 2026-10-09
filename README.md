@@ -84,6 +84,12 @@ Before you begin, ensure you have the following tools installed:
 
 ## Plan B: isolated E2E validation
 
+Release PRs run this validation in GitHub Actions before they can be deployed.
+Only `main` pushes (or a manual run on `main`) deploy, after validation succeeds.
+The deployment stops on tracked VPS changes, updates exact gitlinks without forced
+submodule deinitialization, preserves untracked uploads/configuration, and checks
+proxied readiness after startup. The previous parent SHA is logged for rollback.
+
 Use Python with `httpx` and `websockets` installed. The composition builds the pinned
 submodules, runs migrations before the API/workers, and exposes Nginx on port 8080.
 It uses a dedicated database and uploads volume, never the production database.
