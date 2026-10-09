@@ -53,8 +53,23 @@ jobs:
           docker compose -f docker-compose.e2e.yml config --quiet
       - name: Install smoke dependencies
         run: python -m pip install httpx websockets
+      - name: Pull official mirrors sequentially
+        run: |
+          for image in "$BEERCALL_E2E_POSTGRES_IMAGE" "$BEERCALL_E2E_PROXY_IMAGE" "$BEERCALL_E2E_PYTHON_IMAGE" "$BEERCALL_E2E_NODE_IMAGE" "$BEERCALL_E2E_NGINX_IMAGE"; do
+            pulled=false
+            for attempt in 1 2 3; do
+              if docker pull "$image"; then pulled=true; break; fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+            done
+            if [ "$pulled" != true ]; then exit 1; fi
+          done
       - name: Build and start isolated release
-        run: docker compose -f docker-compose.e2e.yml up -d --build --wait --wait-timeout 180
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose -f docker-compose.e2e.yml up -d --build --wait --wait-timeout 180; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+          done
+          exit 1
       - name: Test proxied release and worker recovery
         env:
           BEERCALL_E2E_RESTART_WORKERS: 'true'
