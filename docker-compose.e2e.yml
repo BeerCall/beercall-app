@@ -1,5 +1,8 @@
 name: beercall-e2e
 
+volumes:
+  uploads_e2e:
+
 services:
   db_e2e:
     image: postgres:15-alpine
@@ -20,8 +23,9 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - FIREBASE_MOCK=true
-      - YOLO_MOCK=true
+      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+    volumes:
+      - uploads_e2e:/app/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -35,8 +39,9 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - FIREBASE_MOCK=true
-      - YOLO_MOCK=true
+      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+    volumes:
+      - uploads_e2e:/app/uploads
     depends_on:
       backend_e2e:
         condition: service_started
@@ -47,8 +52,9 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - FIREBASE_MOCK=true
-      - YOLO_MOCK=true
+      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+    volumes:
+      - uploads_e2e:/app/uploads
     depends_on:
       backend_e2e:
         condition: service_started

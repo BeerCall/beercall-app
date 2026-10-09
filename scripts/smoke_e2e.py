@@ -24,7 +24,19 @@ async def test_e2e():
 
         # 1. Register a user
         username = f"e2e_{uuid.uuid4().hex[:8]}"
-        res = await client.post("/api/auth/register", data={"username": username, "password": "pw"})
+        user_data = {
+            "username": username,
+            "password": "pw",
+            "avatar": {
+                "head": "h1",
+                "body": "b1",
+                "legs": "l1",
+                "feet": "f1",
+                "animation": "a1",
+                "gender": "male"
+            }
+        }
+        res = await client.post("/api/auth/signup/", json=user_data)
         assert res.status_code == 200
         token = res.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
@@ -85,7 +97,7 @@ async def test_e2e():
             # 7. Check outbox / WS message
             ws_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
             data = json.loads(ws_msg)
-            assert data["type"] == "beer_call_started"
+            assert data.get("type") == "REFRESH_SQUAD" and data.get("action") == "CREATE"
             print("✅ WS Outbox event received")
 
 if __name__ == "__main__":
