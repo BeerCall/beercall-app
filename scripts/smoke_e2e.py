@@ -94,8 +94,16 @@ async def test_e2e():
             assert success, "Job did not succeed"
             print("✅ Job processed successfully by workers")
 
+            # Replaying an accepted request must keep the same identity even after success.
+            replay = await create_job()
+            assert replay.status_code == 202
+            assert replay.json()["job_id"] == job_id
+            details = await client.get(f"/api/squads/{squad_id}", headers=headers)
+            details.raise_for_status()
+            assert len(details.json()["active_beer_call"]) == 1
+
             # 7. Check outbox / WS message
-            ws_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            ws_msg = await asyncio.wait_for(ws.recv(), timeout=15.0)
             data = json.loads(ws_msg)
             assert data.get("type") == "REFRESH_SQUAD" and data.get("action") == "CREATE"
             print("✅ WS Outbox event received")

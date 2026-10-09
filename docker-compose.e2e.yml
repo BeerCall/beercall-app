@@ -23,7 +23,7 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+      - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
     volumes:
       - uploads_e2e:/app/uploads
     ports:
@@ -39,7 +39,9 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+      - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
+      - BEERCALL_ENV=e2e
+      - YOLO_MOCK=true
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
@@ -52,7 +54,9 @@ services:
       context: ../beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
-      - BEERCALL_SECRET_KEY=e2e_super_secret_key_12345
+      - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
+      - BEERCALL_ENV=e2e
+      - YOLO_MOCK=true
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
