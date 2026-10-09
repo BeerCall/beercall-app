@@ -1,0 +1,143 @@
+import asyncio
+import httpx
+import uuid
+import websockets
+import json
+import os
+import subprocess
+from pathlib import Path
+
+BASE_URL = os.getenv("BEERCALL_E2E_BASE_URL", "http://localhost:8080")
+
+
+async def worker_command(action: str) -> None:
+    subprocess_args = ["docker", "compose", "-f", "docker-compose.e2e.yml", action]
+    if action == "stop":
+        subprocess_args += ["--timeout", "20"]
+    subprocess_args += ["beer_worker_e2e", "beer_worker_e2e_2"]
+    await asyncio.to_thread(subprocess.run, subprocess_args,
+                            cwd=Path(__file__).resolve().parents[1], check=True, timeout=60)
+
+async def test_e2e():
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        # Wait for API to be healthy
+        for _ in range(10):
+            try:
+                resp = await client.get("/api/health/ready")
+                if resp.status_code == 200:
+                    break
+            except httpx.RequestError:
+                pass
+            await asyncio.sleep(2)
+        else:
+            raise Exception("API not ready")
+
+        print("OK: API ready")
+        page = await client.get("/")
+        assert page.status_code == 200 and 'id="root"' in page.text
+        print("OK: Frontend and readiness served through Nginx")
+
+        # 1. Register a user
+        username = f"e2e_{uuid.uuid4().hex[:8]}"
+        user_data = {
+            "username": username,
+            "password": "pw",
+            "avatar": {
+                "head": "h1",
+                "body": "b1",
+                "legs": "l1",
+                "feet": "f1",
+                "animation": "a1",
+                "gender": "male"
+            }
+        }
+        res = await client.post("/api/auth/signup/", json=user_data)
+        assert res.status_code == 200
+        token = res.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 2. Create a squad
+        res = await client.post("/api/squads/", headers=headers,
+                                json={"name": "e2e_squad", "icon": "beer", "color": "#FFCC00"})
+        assert res.status_code == 200, res.text
+        squad_id = res.json()["id"]
+
+        print("OK: Squad created")
+
+        # 3. Request WS ticket
+        res = await client.post(f"/api/squads/{squad_id}/ws-ticket", headers=headers)
+        assert res.status_code == 200
+        ticket = res.json()["ticket"]
+
+        # 4. Connect to WS
+        ws_url = f"ws{BASE_URL[4:]}/api/squads/{squad_id}/ws"
+        async with websockets.connect(ws_url, subprotocols=["beercall", f"ticket.{ticket}"]) as ws:
+            print("OK: WS connected securely")
+
+            # 5. Concurrent job creation (idempotency test)
+            idem_key = str(uuid.uuid4())
+            valid_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+
+            async def create_job():
+                files = {"file": ("test.png", valid_png, "image/png")}
+                data = {"latitude": "48.0", "longitude": "2.0", "location_name": "E2E Bar"}
+                # Create a fresh client for each request inside the thread
+                async with httpx.AsyncClient(base_url=BASE_URL) as c:
+                    return await c.post(
+                        f"/api/squads/{squad_id}/beer-calls/",
+                        headers={**headers, "Idempotency-Key": idem_key},
+                        data=data,
+                        files=files
+                    )
+
+            restart_workers = os.getenv("BEERCALL_E2E_RESTART_WORKERS") == "true"
+            if restart_workers:
+                await worker_command("stop")
+            try:
+                res1, res2 = await asyncio.gather(create_job(), create_job())
+                if restart_workers:
+                    assert res1.status_code == 202 and res2.status_code == 202
+                    pending = await client.get(
+                        f"/api/squads/{squad_id}/beer-calls/jobs/{res1.json()['job_id']}", headers=headers
+                    )
+                    assert pending.status_code == 200
+                    assert pending.json()["status"] == "pending"
+            finally:
+                if restart_workers:
+                    await worker_command("start")
+                    print("OK: Accepted job survived worker stop/restart")
+            assert res1.status_code == 202
+            assert res2.status_code == 202
+            assert res1.json()["job_id"] == res2.json()["job_id"]
+
+            job_id = res1.json()["job_id"]
+            print(f"OK: Job {job_id} enqueued safely")
+
+            # 6. Poll for job completion
+            success = False
+            for _ in range(20): # max 20s
+                res = await client.get(f"/api/squads/{squad_id}/beer-calls/jobs/{job_id}", headers=headers)
+                if res.json()["status"] == "succeeded":
+                    success = True
+                    break
+                await asyncio.sleep(1)
+
+            assert success, "Job did not succeed"
+            print("OK: Job processed successfully by workers")
+
+            # Replaying an accepted request must keep the same identity even after success.
+            replay = await create_job()
+            assert replay.status_code == 202
+            assert replay.json()["job_id"] == job_id
+            details = await client.get(f"/api/squads/{squad_id}", headers=headers)
+            details.raise_for_status()
+            assert len(details.json()["active_beer_call"]) == 1
+
+            # 7. Check outbox / WS message
+            ws_msg = await asyncio.wait_for(ws.recv(), timeout=15.0)
+            data = json.loads(ws_msg)
+            assert data.get("type") == "REFRESH_SQUAD" and data.get("action") == "CREATE"
+            print("OK: WS Outbox event received")
+
+if __name__ == "__main__":
+    asyncio.run(test_e2e())

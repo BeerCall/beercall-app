@@ -34,6 +34,40 @@ services:
     networks:
       - default
 
+  # --- WORKERS ---
+  beer_worker:
+    build: ./beercall-backend
+    container_name: beercall_beer_worker
+    restart: always
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      - DATABASE_URL=postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - BEERCALL_SECRET_KEY=${BEERCALL_SECRET_KEY:?required}
+      - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
+    volumes:
+      - ./beercall-backend/uploads:/app/uploads
+      - ./secrets:/run/secrets:ro
+    command: ["python", "-m", "workers.beer_call_worker"]
+    networks:
+      - default
+
+  daily_worker:
+    build: ./beercall-backend
+    container_name: beercall_daily_worker
+    restart: always
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      - DATABASE_URL=postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - BEERCALL_SECRET_KEY=${BEERCALL_SECRET_KEY:?required}
+      - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
+    command: ["python", "-m", "workers.daily_checks"]
+    networks:
+      - default
+
   # --- BACKEND ---
   backend:
     build: ./beercall-backend
