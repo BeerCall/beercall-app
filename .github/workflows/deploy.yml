@@ -54,6 +54,10 @@ jobs:
             echo "Parent SHA déployé : $(git rev-parse HEAD)"
             git submodule status
             
+            # Copier le .env racine dans les sous-modules (indispensable pour ViteJS)
+            cp .env beercall-frontend/.env 2>/dev/null || true
+            cp .env beercall-backend/.env 2>/dev/null || true
+
             # On reconstruit avec Docker Compose
             docker compose up -d --build
             
