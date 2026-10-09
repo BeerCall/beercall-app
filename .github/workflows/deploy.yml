@@ -4,11 +4,64 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   # Permet de lancer manuellement depuis l'onglet Actions
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: beercall-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    name: Validate pinned release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DB_USER: ci_user
+      DB_PASSWORD: ci_only_password
+      DB_NAME: beercall_test
+      BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Prepare isolated test keys
+        run: |
+          echo "BEERCALL_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "BEERCALL_E2E_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - name: Validate gitlinks and Compose
+        run: |
+          git submodule status
+          if git submodule status | grep -E '^[-+U]'; then exit 1; fi
+          docker compose config --quiet
+          docker compose -f docker-compose.e2e.yml config --quiet
+      - name: Install smoke dependencies
+        run: python -m pip install httpx websockets
+      - name: Build and start isolated release
+        run: docker compose -f docker-compose.e2e.yml up -d --build --wait --wait-timeout 180
+      - name: Test proxied release and worker recovery
+        env:
+          BEERCALL_E2E_RESTART_WORKERS: 'true'
+        run: python scripts/smoke_e2e.py
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.e2e.yml logs --no-color --tail 150
+      - name: Stop isolated release
+        if: always()
+        run: docker compose -f docker-compose.e2e.yml down
+
   deploy:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
@@ -18,27 +71,19 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           timeout: 30m
+          command_timeout: 30m
           script: |
+            set -eu
             cd $HOME/beercall-app
             
             # Sauvegarder le SHA précédent pour rollback documenté
             PREV_SHA=$(git rev-parse HEAD || echo "unknown")
             echo "SHA précédent pour rollback : $PREV_SHA"
             
-            # Bootstrap .gitignore since the previous deployment didn't have it
-            git fetch origin main
-            git checkout FETCH_HEAD -- .gitignore 2>/dev/null || true
-
-            # Vider les sous-modules pour éviter le statut sale "M SC" dû aux vieux gitlinks de l'ancien HEAD
-            git submodule deinit -f --all
-
-            # Nettoyer l'état staging du bootstrap de .gitignore (A)
-            git reset HEAD .gitignore 2>/dev/null || true
-
-            # Vérifier que le dépôt n'est pas sale avant modification (en ignorant les erreurs de permission sur les dossiers ignorés)
-            if [ -n "$(git status --porcelain=v2 2>/dev/null | grep -v '^\?')" ]; then
+            # Conserver les uploads et .env non suivis ; ne jamais forcer/deinit les modules.
+            if [ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=untracked)" ]; then
               echo "Erreur : le dépôt VPS est sale, modifications locales détectées :"
-              git status --porcelain=v2 2>/dev/null
+              git status --porcelain --untracked-files=no --ignore-submodules=untracked
               exit 1
             fi
             
@@ -59,10 +104,10 @@ jobs:
             cp .env beercall-backend/.env 2>/dev/null || true
 
             # On reconstruit avec Docker Compose
-            docker compose up -d --build
+            docker compose up -d --build --wait --wait-timeout 180
             
             # On force Nginx à recharger sa configuration (applique le fix DNS)
-            docker compose exec -T nginx_beercall nginx -s reload || true
-            
-            # On nettoie les anciennes images
-            docker image prune -f
+            docker compose exec -T nginx_beercall nginx -t
+            docker compose exec -T nginx_beercall nginx -s reload
+            docker compose exec -T nginx_beercall wget -qO- http://127.0.0.1/api/health/ready
+            docker compose ps
