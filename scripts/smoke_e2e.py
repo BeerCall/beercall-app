@@ -3,8 +3,20 @@ import httpx
 import uuid
 import websockets
 import json
+import os
+import subprocess
+from pathlib import Path
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("BEERCALL_E2E_BASE_URL", "http://localhost:8080")
+
+
+async def worker_command(action: str) -> None:
+    subprocess_args = ["docker", "compose", "-f", "docker-compose.e2e.yml", action]
+    if action == "stop":
+        subprocess_args += ["--timeout", "20"]
+    subprocess_args += ["beer_worker_e2e", "beer_worker_e2e_2"]
+    await asyncio.to_thread(subprocess.run, subprocess_args,
+                            cwd=Path(__file__).resolve().parents[1], check=True, timeout=60)
 
 async def test_e2e():
     async with httpx.AsyncClient(base_url=BASE_URL) as client:
@@ -20,7 +32,10 @@ async def test_e2e():
         else:
             raise Exception("API not ready")
 
-        print("✅ API ready")
+        print("OK: API ready")
+        page = await client.get("/")
+        assert page.status_code == 200 and 'id="root"' in page.text
+        print("OK: Frontend and readiness served through Nginx")
 
         # 1. Register a user
         username = f"e2e_{uuid.uuid4().hex[:8]}"
@@ -42,11 +57,12 @@ async def test_e2e():
         headers = {"Authorization": f"Bearer {token}"}
 
         # 2. Create a squad
-        res = await client.post("/api/squads/", headers=headers, json={"name": "e2e_squad"})
-        assert res.status_code == 200
+        res = await client.post("/api/squads/", headers=headers,
+                                json={"name": "e2e_squad", "icon": "beer", "color": "#FFCC00"})
+        assert res.status_code == 200, res.text
         squad_id = res.json()["id"]
 
-        print("✅ Squad created")
+        print("OK: Squad created")
 
         # 3. Request WS ticket
         res = await client.post(f"/api/squads/{squad_id}/ws-ticket", headers=headers)
@@ -54,9 +70,9 @@ async def test_e2e():
         ticket = res.json()["ticket"]
 
         # 4. Connect to WS
-        ws_url = f"ws://localhost:8000/api/squads/{squad_id}/ws"
+        ws_url = f"ws{BASE_URL[4:]}/api/squads/{squad_id}/ws"
         async with websockets.connect(ws_url, subprotocols=["beercall", f"ticket.{ticket}"]) as ws:
-            print("✅ WS connected securely")
+            print("OK: WS connected securely")
 
             # 5. Concurrent job creation (idempotency test)
             idem_key = str(uuid.uuid4())
@@ -74,13 +90,28 @@ async def test_e2e():
                         files=files
                     )
 
-            res1, res2 = await asyncio.gather(create_job(), create_job())
+            restart_workers = os.getenv("BEERCALL_E2E_RESTART_WORKERS") == "true"
+            if restart_workers:
+                await worker_command("stop")
+            try:
+                res1, res2 = await asyncio.gather(create_job(), create_job())
+                if restart_workers:
+                    assert res1.status_code == 202 and res2.status_code == 202
+                    pending = await client.get(
+                        f"/api/squads/{squad_id}/beer-calls/jobs/{res1.json()['job_id']}", headers=headers
+                    )
+                    assert pending.status_code == 200
+                    assert pending.json()["status"] == "pending"
+            finally:
+                if restart_workers:
+                    await worker_command("start")
+                    print("OK: Accepted job survived worker stop/restart")
             assert res1.status_code == 202
             assert res2.status_code == 202
             assert res1.json()["job_id"] == res2.json()["job_id"]
 
             job_id = res1.json()["job_id"]
-            print(f"✅ Job {job_id} enqueued safely")
+            print(f"OK: Job {job_id} enqueued safely")
 
             # 6. Poll for job completion
             success = False
@@ -92,7 +123,7 @@ async def test_e2e():
                 await asyncio.sleep(1)
 
             assert success, "Job did not succeed"
-            print("✅ Job processed successfully by workers")
+            print("OK: Job processed successfully by workers")
 
             # Replaying an accepted request must keep the same identity even after success.
             replay = await create_job()
@@ -106,7 +137,7 @@ async def test_e2e():
             ws_msg = await asyncio.wait_for(ws.recv(), timeout=15.0)
             data = json.loads(ws_msg)
             assert data.get("type") == "REFRESH_SQUAD" and data.get("action") == "CREATE"
-            print("✅ WS Outbox event received")
+            print("OK: WS Outbox event received")
 
 if __name__ == "__main__":
     asyncio.run(test_e2e())

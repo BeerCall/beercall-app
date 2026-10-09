@@ -4,6 +4,16 @@ volumes:
   uploads_e2e:
 
 services:
+  migrate_e2e:
+    build:
+      context: ./beercall-backend
+    environment:
+      - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
+    depends_on:
+      db_e2e:
+        condition: service_healthy
+    command: python -m alembic upgrade head
+
   db_e2e:
     image: postgres:15-alpine
     environment:
@@ -20,7 +30,7 @@ services:
 
   backend_e2e:
     build:
-      context: ../beercall-backend
+      context: ./beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -28,15 +38,20 @@ services:
       - uploads_e2e:/app/uploads
     ports:
       - "8000:8000"
+    networks:
+      default:
+        aliases: [backend]
     depends_on:
       db_e2e:
         condition: service_healthy
+      migrate_e2e:
+        condition: service_completed_successfully
     command: >
-      sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+      uvicorn main:app --host 0.0.0.0 --port 8000
 
   beer_worker_e2e:
     build:
-      context: ../beercall-backend
+      context: ./beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -45,13 +60,13 @@ services:
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
-      backend_e2e:
-        condition: service_started
+      migrate_e2e:
+        condition: service_completed_successfully
     command: python -m workers.beer_call_worker
 
   beer_worker_e2e_2:
     build:
-      context: ../beercall-backend
+      context: ./beercall-backend
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
@@ -60,6 +75,32 @@ services:
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
-      backend_e2e:
-        condition: service_started
+      migrate_e2e:
+        condition: service_completed_successfully
     command: python -m workers.beer_call_worker
+
+  daily_worker_e2e:
+    build:
+      context: ./beercall-backend
+    environment:
+      - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
+    depends_on:
+      migrate_e2e:
+        condition: service_completed_successfully
+    command: python -m workers.daily_checks
+
+  frontend_e2e:
+    build: ./beercall-frontend
+    networks:
+      default:
+        aliases: [frontend]
+
+  proxy_e2e:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend_e2e
+      - frontend_e2e
