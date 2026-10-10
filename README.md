@@ -82,7 +82,7 @@ Before you begin, ensure you have the following tools installed:
 
 ---
 
-## Plan B: isolated E2E validation
+## Plans B/C: isolated E2E validation
 
 Release PRs run this validation in GitHub Actions before they can be deployed.
 Only `main` pushes (or a manual run on `main`) deploy, after validation succeeds.
@@ -93,6 +93,10 @@ proxied readiness after startup. The previous parent SHA is logged for rollback.
 Use Python with `httpx` and `websockets` installed. The composition builds the pinned
 submodules, runs migrations before the API/workers, and exposes Nginx on port 8080.
 It uses a dedicated database and uploads volume, never the production database.
+Only the proxy exposes a host port (8080): the database and API have no host ports
+(no 5433 or 8000), avoiding collisions with local development databases/APIs.
+The API, frontend and proxy have healthchecks; `up --wait` waits for readiness.
+Only one stack can use port 8080 at a time.
 
 PowerShell, from this repository:
 
@@ -101,14 +105,19 @@ $env:BEERCALL_E2E_SECRET_KEY = [guid]::NewGuid().ToString()
 docker compose -f docker-compose.e2e.yml up -d --build --wait
 $env:BEERCALL_E2E_RESTART_WORKERS = 'true'
 python scripts/smoke_e2e.py
-docker compose -f docker-compose.e2e.yml stop
+docker compose -f docker-compose.e2e.yml down -v
 ```
 
 The smoke checks proxied readiness/frontend, ticket-based WebSockets, concurrent
 idempotent enqueue, job survival while both workers are stopped, successful processing
-after restart, a single final apero, and outbox delivery. The image validator is mocked
-**only** in the E2E workers (`BEERCALL_ENV=e2e`, `YOLO_MOCK=true`). Firebase delivery is
-tested separately; no real device notification is sent by this smoke.
+after restart, a single final apero, and outbox delivery. The test photo detector is
+enabled on the API and both Beer Call workers with `APP_ENV=test` and
+`PHOTO_DETECTOR_MODE=always_accept`; it is rejected at startup outside the test
+environment. `BEERCALL_E2E_GAME` defaults to `BRAIN_DUEL` in this composition and
+can select another playable mini-game; forced selection never applies outside test.
+Firebase delivery is tested separately; no real device notification is sent by this smoke.
+Always run `down -v`, including after failure, to remove the ephemeral containers
+and the `uploads_e2e` volume. Do not use the production composition for these tests.
 
 ## 📂 Project Structure
 
