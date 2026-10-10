@@ -1,0 +1,8 @@
+{
+  "name": "beercall-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "playwright test" },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}
