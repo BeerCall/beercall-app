@@ -165,7 +165,8 @@ propre et des données sauvegardées :
 ```bash
 git status --short
 git fetch origin
-git checkout --detach <previous_verified_parent_sha>
+# Définir PREVIOUS_PARENT_SHA avec le SHA publié et vérifié retenu par migzer.
+git checkout --detach "$PREVIOUS_PARENT_SHA"
 git submodule update --init --recursive
 docker compose up -d --build --wait --wait-timeout 180
 docker compose up -d --no-deps --force-recreate --wait --wait-timeout 60 nginx_beercall
