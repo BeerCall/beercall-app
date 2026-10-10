@@ -128,7 +128,11 @@ jobs:
             # On reconstruit avec Docker Compose
             docker compose up -d --build --wait --wait-timeout 180
             
-            # On force Nginx à recharger sa configuration (applique le fix DNS)
+            # Git peut remplacer l'inode du fichier monté nginx/default.conf.
+            # Un reload seul peut alors relire l'ancien fichier : renouveler le montage.
+            docker compose up -d --no-deps --force-recreate --wait --wait-timeout 60 nginx_beercall
+
+            # Valider la configuration du nouveau conteneur et le routage API.
             docker compose exec -T nginx_beercall nginx -t
             docker compose exec -T nginx_beercall nginx -s reload
             docker compose exec -T nginx_beercall wget -qO- http://127.0.0.1/api/health/ready
