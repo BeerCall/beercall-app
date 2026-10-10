@@ -112,7 +112,12 @@ jobs:
       - name: Pull official images sequentially
         run: |
           for image in "$BEERCALL_E2E_POSTGRES_IMAGE" "$BEERCALL_E2E_PROXY_IMAGE" "$BEERCALL_E2E_PYTHON_IMAGE" "$BEERCALL_E2E_NODE_IMAGE" "$BEERCALL_E2E_NGINX_IMAGE"; do
-            docker pull "$image"
+            pulled=false
+            for attempt in 1 2 3; do
+              if docker pull "$image"; then pulled=true; break; fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+            done
+            if [ "$pulled" != true ]; then exit 1; fi
           done
       - name: Build and start browser test composition
         run: |
