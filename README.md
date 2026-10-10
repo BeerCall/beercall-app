@@ -119,6 +119,28 @@ Firebase delivery is tested separately; no real device notification is sent by t
 Always run `down -v`, including after failure, to remove the ephemeral containers
 and the `uploads_e2e` volume. Do not use the production composition for these tests.
 
+Browser tests use an isolated Node >= 20 package with Playwright 1.63.0. After
+starting the same composition, run from `e2e/`: `npm ci`,
+`npx playwright install chromium`, then `npx playwright test` twice. No server is
+started by Playwright. Tests cover auth/squads and the actual durable job,
+WebSocket invalidation, ticket replay refusal, participation and deterministic game.
+
+The parent workflow keeps the durable smoke in **Validate pinned release** and
+adds **E2E browser (Chromium)**. Deployment requires both jobs; PRs never deploy.
+On browser failure, composition logs and Playwright diagnostics are retained as
+an artifact; browser-job cleanup always removes the ephemeral volume. The owner
+must manually make both checks required on `main` after a green workflow run.
+
+## Architecture and operations
+
+- [Components, data flows and configuration](docs/architecture.md)
+- [Release, migrations, backups, restoration and rollback](docs/operations.md)
+- [ADR: single API/relay and daily scheduler](docs/adr/0001-monolithe-workers-singleton.md)
+
+Release and backup/restore owner: **migzer**. These procedures document explicit
+human responsibilities; they do not authorize a merge, production deployment or
+destructive restoration.
+
 ## 📂 Project Structure
 
 ```
