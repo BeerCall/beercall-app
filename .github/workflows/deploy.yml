@@ -81,8 +81,77 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.e2e.yml down
 
+  e2e-browser:
+    name: E2E browser (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
+      BEERCALL_E2E_PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.13-slim
+      BEERCALL_E2E_NODE_IMAGE: public.ecr.aws/docker/library/node:22-alpine
+      BEERCALL_E2E_NGINX_IMAGE: public.ecr.aws/docker/library/nginx:stable-alpine
+      BEERCALL_E2E_PROXY_IMAGE: public.ecr.aws/docker/library/nginx:alpine
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Prepare isolated test key
+        run: |
+          value=$(openssl rand -hex 32)
+          echo "::add-mask::$value"
+          echo "BEERCALL_E2E_SECRET_KEY=$value" >> "$GITHUB_ENV"
+      - name: Validate pinned gitlinks
+        run: |
+          if git submodule status | grep -E '^[-+U]'; then exit 1; fi
+      - name: Pull official images sequentially
+        run: |
+          for image in "$BEERCALL_E2E_POSTGRES_IMAGE" "$BEERCALL_E2E_PROXY_IMAGE" "$BEERCALL_E2E_PYTHON_IMAGE" "$BEERCALL_E2E_NODE_IMAGE" "$BEERCALL_E2E_NGINX_IMAGE"; do
+            pulled=false
+            for attempt in 1 2 3; do
+              if docker pull "$image"; then pulled=true; break; fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+            done
+            if [ "$pulled" != true ]; then exit 1; fi
+          done
+      - name: Build and start browser test composition
+        run: |
+          for attempt in 1 2; do
+            if docker compose -f docker-compose.e2e.yml up -d --build --wait --wait-timeout 180; then exit 0; fi
+          done
+          exit 1
+      - name: Install isolated browser test dependencies
+        working-directory: e2e
+        run: npm ci
+      - name: Install Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+      - name: Run browser E2E
+        working-directory: e2e
+        run: npx playwright test
+      - name: Capture composition logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.e2e.yml logs --no-color --tail 150 > e2e-compose.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-browser-failure
+          path: |
+            e2e-compose.log
+            e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove ephemeral test containers and volumes
+        if: always()
+        run: docker compose -f docker-compose.e2e.yml down -v
+
   deploy:
-    needs: validate
+    needs: [validate, e2e-browser]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
