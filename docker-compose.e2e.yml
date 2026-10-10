@@ -37,6 +37,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
+      - APP_ENV=test
+      - PHOTO_DETECTOR_MODE=always_accept
     volumes:
       - uploads_e2e:/app/uploads
     ports:
@@ -57,8 +59,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
-      - BEERCALL_ENV=e2e
-      - YOLO_MOCK=true
+      - APP_ENV=test
+      - PHOTO_DETECTOR_MODE=always_accept
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
@@ -71,8 +73,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
-      - BEERCALL_ENV=e2e
-      - YOLO_MOCK=true
+      - APP_ENV=test
+      - PHOTO_DETECTOR_MODE=always_accept
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
@@ -84,6 +86,8 @@ services:
     build: *backend_build
     environment:
       - DATABASE_URL=postgresql+psycopg://test_user:test_password@db_e2e:5432/test_db
+      - APP_ENV=test
+      - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
     depends_on:
       migrate_e2e:
         condition: service_completed_successfully
