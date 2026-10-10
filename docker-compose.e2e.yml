@@ -39,6 +39,7 @@ services:
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
       - APP_ENV=test
       - PHOTO_DETECTOR_MODE=always_accept
+      - BEERCALL_E2E_GAME=${BEERCALL_E2E_GAME:-BRAIN_DUEL}
     volumes:
       - uploads_e2e:/app/uploads
     ports:
@@ -61,6 +62,7 @@ services:
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
       - APP_ENV=test
       - PHOTO_DETECTOR_MODE=always_accept
+      - BEERCALL_E2E_GAME=${BEERCALL_E2E_GAME:-BRAIN_DUEL}
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
@@ -75,6 +77,7 @@ services:
       - BEERCALL_SECRET_KEY=${BEERCALL_E2E_SECRET_KEY:?Set BEERCALL_E2E_SECRET_KEY}
       - APP_ENV=test
       - PHOTO_DETECTOR_MODE=always_accept
+      - BEERCALL_E2E_GAME=${BEERCALL_E2E_GAME:-BRAIN_DUEL}
     volumes:
       - uploads_e2e:/app/uploads
     depends_on:
