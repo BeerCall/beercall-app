@@ -87,11 +87,11 @@ jobs:
     timeout-minutes: 45
     env:
       BEERCALL_E2E_GAME: HOT_POTATO
-      BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
-      BEERCALL_E2E_PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.13-slim
-      BEERCALL_E2E_NODE_IMAGE: public.ecr.aws/docker/library/node:22-alpine
-      BEERCALL_E2E_NGINX_IMAGE: public.ecr.aws/docker/library/nginx:stable-alpine
-      BEERCALL_E2E_PROXY_IMAGE: public.ecr.aws/docker/library/nginx:alpine
+      BEERCALL_E2E_POSTGRES_IMAGE: postgres:15-alpine
+      BEERCALL_E2E_PYTHON_IMAGE: python:3.13-slim
+      BEERCALL_E2E_NODE_IMAGE: node:22-alpine
+      BEERCALL_E2E_NGINX_IMAGE: nginx:stable-alpine
+      BEERCALL_E2E_PROXY_IMAGE: nginx:alpine
     steps:
       - uses: actions/checkout@v4
         with:
