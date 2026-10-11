@@ -94,11 +94,13 @@ async function touchSwipe(page: Page, direction: 'next' | 'previous') {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start + (direction === 'next' ? -1 : 1) * step * 20, y, id: 1 }] });
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     }
-    // End a settled swipe, not a synthetic flick that consumes the next native tap in Chromium.
-    for (let frame = 0; frame < 3; frame++) {
+    // A frame count depends on scheduling. Keep contact stationary for a real 200ms
+    // before release so Chromium does not consume the next tap as the end of a flick.
+    const settleUntil = performance.now() + 200;
+    do {
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start + (direction === 'next' ? -120 : 120), y, id: 1 }] });
-    }
+    } while (performance.now() < settleUntil);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   } finally { await cdp.detach(); }
 }
