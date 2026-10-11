@@ -80,6 +80,7 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
   context.pages().forEach(attachPage);
   context.on('page', attachPage);
   await context.addInitScript(({ authenticated }) => {
+    if (window.location.origin !== 'http://127.0.0.1:4173') return;
     localStorage.clear();
     if (authenticated) {
       localStorage.setItem('user-storage', JSON.stringify({ state: { isAuthenticated: true, username: 'FixtureUser' }, version: 0 }));
