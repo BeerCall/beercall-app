@@ -1,4 +1,4 @@
-import { test, expect, type Locator } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { installUxFixtures, makeSquads } from './support/uxFixtures';
 
 test.use({ viewport: { width: 390, height: 844 }, trace: 'off' });
@@ -121,4 +121,122 @@ test.describe('Navigation au pointeur : états normal et hover réellement actif
     }
     isolation.assertIsolated();
   });
+});
+
+async function measureWardrobe(locator: Locator, label: string) {
+  await locator.scrollIntoViewIfNeeded();
+  return measurePair(locator, label, true);
+}
+
+async function enterSignup(page: Page) {
+  await page.goto('/signup');
+  await page.getByPlaceholder('Pseudo', { exact: true }).fill('FixtureUser');
+  await page.getByPlaceholder('Mot de passe', { exact: true }).fill('Fixture123');
+  await page.getByRole('button', { name: "CRÉER L'AVATAR" }).tap();
+  await expect(page.getByRole('heading', { name: 'Vestiaire', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Créer mon compte', exact: true })).toBeEnabled();
+}
+
+async function loadedIdle(page: Page) {
+  const tab = page.getByRole('button', { name: /Anim$/ });
+  await tab.scrollIntoViewIfNeeded();
+  await tab.focus();
+  await tab.press('Enter');
+  await expect(tab, 'Onglet Anim réellement sélectionné avant mesure').toHaveClass(/bg-gray-900/);
+  const idle = page.getByRole('button', { name: 'Idle', exact: true });
+  await expect(idle, 'Animation issue du FBX réel, pas injectée par le test').toBeVisible();
+  await expect(idle).toBeEnabled();
+  return idle;
+}
+
+test('profil propre : sous-titre, article équipé, badges et rang', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { profileMode: 'own', assets: true });
+  await page.goto('/profile');
+  await expect(page.getByRole('heading', { name: 'Vestiaire', exact: true })).toBeVisible();
+  await measureWardrobe(page.getByText(/Personnalise ton/), 'Profil sous-titre');
+  await measureWardrobe(page.getByText('Sans couvre-chef', { exact: true }), 'Profil article équipé');
+  await measureWardrobe(page.getByText('Équipé', { exact: true }), 'Profil Équipé');
+  await measureWardrobe(page.getByText('Possédé', { exact: true }), 'Profil Possédé');
+  await measurePair(page.getByText('Rang test', { exact: true }), 'Profil rang');
+  const idle = await loadedIdle(page);
+  await expect(idle).toHaveClass(/border-beer/);
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
+});
+
+test('profil propre : animation Idle sélectionnée et Aucun', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { profileMode: 'own', assets: true });
+  await page.goto('/profile');
+  const idle = await loadedIdle(page);
+  await expect(idle).toHaveClass(/border-beer/);
+  await measureWardrobe(idle.locator('span').first(), 'Profil Idle sélectionné');
+  await page.getByRole('button', { name: /Accessoire$/ }).tap();
+  await expect(page.getByRole('button', { name: /Aucun/ })).toHaveClass(/border-beer/);
+  await measureWardrobe(page.getByText('Aucun', { exact: true }), 'Profil Aucun sélectionné');
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
+});
+
+test('signup : sous-titre, tenue initiale et article à essayer', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { authenticated: false, assets: true });
+  await enterSignup(page);
+  await measureWardrobe(page.getByText(/Personnalise ton/), 'Signup sous-titre');
+  await measureWardrobe(page.getByText('Sans couvre-chef', { exact: true }), 'Signup article initial');
+  await measureWardrobe(page.getByText('Tenue initiale', { exact: true }), 'Signup Tenue initiale');
+  await measureWardrobe(page.getByText('À essayer', { exact: true }), 'Signup À essayer');
+  await expect(page.getByText('Possédé', { exact: true })).toHaveCount(0);
+  await loadedIdle(page);
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
+});
+
+test('signup : genres sélectionné/inactif, dans les deux états', async ({ context, page }) => {
+  // The editable profile has no gender switch; these controls belong to signup.
+  const isolation = await installUxFixtures(context, { authenticated: false, assets: true });
+  await enterSignup(page);
+  const men = page.getByRole('button', { name: 'Homme', exact: true });
+  const women = page.getByRole('button', { name: 'Femme', exact: true });
+  await expect(men).toHaveClass(/bg-white/);
+  await measurePair(men, 'Signup Homme sélectionné');
+  await measurePair(women, 'Signup Femme inactive');
+  await women.tap();
+  await expect(women).toHaveClass(/bg-white/);
+  await measurePair(women, 'Signup Femme sélectionnée');
+  await measurePair(men, 'Signup Homme inactif');
+  await expect(page.getByText('Sans couvre-chef', { exact: true })).toHaveCount(0);
+  await loadedIdle(page);
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
+});
+
+test('signup : Idle choisi depuis le FBX et Aucun', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { authenticated: false, assets: true });
+  await enterSignup(page);
+  const idle = await loadedIdle(page);
+  await idle.tap();
+  await expect(idle).toHaveClass(/border-beer/);
+  await measureWardrobe(idle.locator('span').first(), 'Signup Idle sélectionné');
+  await page.getByRole('button', { name: /Accessoire$/ }).tap();
+  await expect(page.getByRole('button', { name: /Aucun/ })).toHaveClass(/border-beer/);
+  await measureWardrobe(page.getByText('Aucun', { exact: true }), 'Signup Aucun sélectionné');
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
+});
+
+test('profil tiers : rang et informations, sans vestiaire fictif', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { profileMode: 'readonly', assets: true });
+  await page.goto('/profile/900002');
+  await expect(page.getByRole('heading', { name: 'FixtureUser', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Statistiques', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Vestiaire', exact: true })).toHaveCount(0);
+  await measurePair(page.getByText('Rang test', { exact: true }), 'Profil tiers rang');
+  await expect.poll(() => isolation.assetHits.fbx).toBeGreaterThan(0);
+  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  isolation.assertAssets();
+  isolation.assertIsolated();
 });
