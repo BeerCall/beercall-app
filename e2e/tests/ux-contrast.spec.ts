@@ -79,8 +79,8 @@ for (const color of ['#F59E0B', '#EF4444', '#10B981', '#3B82F6', '#8B5CF6', '#EC
     expect(pair.background.slice(0, 3)).toEqual([255, 255, 255]);
     const rgb = [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16));
     await expect(heading).toHaveCSS('font-size', '20px');
-    const border = await heading.evaluate(el => getComputedStyle(el.parentElement!.parentElement!).borderTopColor);
-    expect(border).toBe(`rgba(${rgb.join(', ')}, 0.25)`);
+    await expect(heading.locator('xpath=../..'), 'Couleur API exacte après la transition CSS')
+      .toHaveCSS('border-top-color', `rgba(${rgb.join(', ')}, 0.25)`);
     isolation.assertIsolated();
   });
 }
@@ -239,4 +239,41 @@ test('profil tiers : rang et informations, sans vestiaire fictif', async ({ cont
   await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
   isolation.assertAssets();
   isolation.assertIsolated();
+});
+
+test.describe('Carte vide : lisibilité identique jour et nuit', () => {
+  test.use({ timezoneId: 'Europe/Paris' });
+  test('surface opaque à 12h et 22h, styles cartographiques distincts', async ({ context, page }) => {
+    const isolation = await installUxFixtures(context, { calls: [] });
+    const styles: string[] = [];
+    context.on('request', request => {
+      if (request.url().includes('basemaps.cartocdn.com/gl/') && request.url().endsWith('/style.json')) styles.push(request.url());
+    });
+    const ratios: number[] = [];
+    for (const hour of [12, 22]) {
+      await page.clock.setFixedTime(new Date(`2026-10-11T${hour === 12 ? '10' : '20'}:00:00Z`));
+      const response = page.waitForResponse(r => /\/api\/squads\/900001\/?$/.test(new URL(r.url()).pathname) && r.request().method() === 'GET');
+      await page.goto('/squad/900001');
+      expect((await response).status(), 'Un vrai succès squad précède le vide').toBe(200);
+      expect(await page.evaluate(() => new Date().getHours())).toBe(hour);
+      const text = page.getByText(/Aucun événement/);
+      await expect(text).toBeVisible();
+      const surface = await text.evaluate(el => {
+        const card = el.parentElement!;
+        const style = getComputedStyle(card), r = card.getBoundingClientRect();
+        return { opacity: Number(style.opacity), background: style.backgroundColor, width: r.width, height: r.height };
+      });
+      expect(surface).toEqual({ opacity: 1, background: 'rgb(255, 255, 255)', width: 220, height: 130 });
+      const pair = await measurePair(text, `Carte vide ${hour}h`);
+      expect(pair.background).toEqual([255, 255, 255, 1]);
+      expect(pair.foreground.slice(0, 3)).toEqual([54, 65, 83]);
+      ratios.push(pair.ratio);
+      const expectedStyle = `https://basemaps.cartocdn.com/gl/${hour === 12 ? 'positron' : 'dark-matter'}-gl-style/style.json`;
+      await expect.poll(() => styles.includes(expectedStyle), `Carte ${hour === 12 ? 'diurne' : 'nocturne'} réellement demandée`).toBe(true);
+      isolation.assertIsolated();
+    }
+    expect(ratios[0]).toBe(ratios[1]);
+    expect(new Set(styles).size).toBe(2);
+    console.log(JSON.stringify({ label: 'Carte vide jour/nuit', ratios, styles }));
+  });
 });
