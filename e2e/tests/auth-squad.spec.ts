@@ -10,9 +10,8 @@ async function signup(page: Page, username: string) {
   await page.getByPlaceholder('Pseudo', { exact: true }).fill(username);
   await page.getByPlaceholder('Mot de passe', { exact: true }).fill(password);
   await page.getByRole('button', { name: "CRÉER L'AVATAR" }).click();
-  await page.getByRole('button', { name: '🧢 Suit Possédé', exact: true }).click();
   const registered = page.waitForResponse(response => response.url().endsWith('/api/auth/signup/') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: 'SAUVEGARDER LE STYLE' }).click();
+  await page.getByRole('button', { name: 'Créer mon compte' }).click();
   expect((await registered).status()).toBe(200);
   await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole('heading', { name: `Salut ${username} !`, exact: true })).toBeVisible();

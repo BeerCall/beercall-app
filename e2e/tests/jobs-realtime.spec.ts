@@ -79,7 +79,14 @@ function refreshed(page: Page, socket: BrowserSocket, action: string) {
   // Suivre aussi les reconnexions réelles du hook, pas seulement le premier socket.
   return new Promise<void>(resolve => {
     const attach = (current: BrowserSocket) => current.on('framereceived', frame => {
-      const payload = JSON.parse(frame.payload.toString()) as { type: string; action: string };
+      const text = frame.payload.toString();
+      if (text === 'PONG') return;
+      let payload: { type: string; action: string };
+      try {
+        payload = JSON.parse(text) as { type: string; action: string };
+      } catch {
+        return;
+      }
       if (payload.type === 'REFRESH_SQUAD' && payload.action === action) {
         page.off('websocket', attach);
         resolve();
@@ -171,10 +178,14 @@ test('participation réelle puis démarrage et fin du mini-jeu déterministe', a
     const aperoId = /\/beer-calls\/bc_(\d+)\/join\/$/.exec(participation.url())![1];
     await expect(setup.member.page.getByText('2 Participants', { exact: true })).toBeVisible();
     const worlds = setup.member.page.waitForResponse(response => response.url().endsWith(`/api/squads/${setup.squad.id}/beer-calls/bc_${aperoId}/worlds`));
-    await setup.member.page.getByRole('button', { name: 'Mondes 🌍' }).click();
+    await setup.member.page.getByRole('button', { name: 'Mondes 🌍' }).click({ force: true });
     expect((await worlds).status()).toBe(200);
+    // Le levier 3D reste le contrôle visuel ; le bouton masqué accessible permet
+    // un lancement déterministe sans attendre le chargement des modèles FBX.
+    const startButton = setup.member.page.getByRole('button', { name: 'Démarrer la partie' });
+    await expect(startButton).toBeEnabled({ timeout: 30_000 });
     const started = setup.member.page.waitForResponse(response => response.url().endsWith(`/api/aperos/${aperoId}/game/start`));
-    await setup.member.page.getByRole('button', { name: 'Lancer le jeu', exact: true }).click();
+    await startButton.dispatchEvent('click');
     expect((await (await started).json() as { game_id: string }).game_id).toBe('TURN_TRANSITION');
     const selected = gameActionResponse(setup.member.page, aperoId);
     await setup.member.page.getByRole('button', { name: 'Je suis prêt !', exact: true }).click();

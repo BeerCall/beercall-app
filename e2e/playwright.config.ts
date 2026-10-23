@@ -10,5 +10,20 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:8080',
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    {
+      name: 'integration',
+      testIgnore: /ux-.*\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'ux',
+      testMatch: /ux-.*\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        hasTouch: true,
+        serviceWorkers: 'block',
+      },
+    },
+  ],
 });

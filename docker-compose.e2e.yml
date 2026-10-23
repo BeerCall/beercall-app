@@ -18,6 +18,15 @@ services:
         condition: service_healthy
     command: python -m alembic upgrade head
 
+  # Initialise le volume partagé avant que backend et workers ne le montent.
+  # Sans ce service, plusieurs conteneurs copient /app/uploads dans le volume
+  # en parallèle et Docker échoue avec « mkdir .../aperos: file exists ».
+  uploads_init_e2e:
+    build: *backend_build
+    volumes:
+      - uploads_e2e:/app/uploads
+    command: mkdir -p /app/uploads/aperos
+
   db_e2e:
     image: ${BEERCALL_E2E_POSTGRES_IMAGE:-postgres:15-alpine}
     environment:
@@ -54,6 +63,8 @@ services:
         condition: service_healthy
       migrate_e2e:
         condition: service_completed_successfully
+      uploads_init_e2e:
+        condition: service_completed_successfully
     command: >
       uvicorn main:app --host 0.0.0.0 --port 8000
 
@@ -70,6 +81,8 @@ services:
     depends_on:
       migrate_e2e:
         condition: service_completed_successfully
+      uploads_init_e2e:
+        condition: service_completed_successfully
     command: python -m workers.beer_call_worker
 
   beer_worker_e2e_2:
@@ -84,6 +97,8 @@ services:
       - uploads_e2e:/app/uploads
     depends_on:
       migrate_e2e:
+        condition: service_completed_successfully
+      uploads_init_e2e:
         condition: service_completed_successfully
     command: python -m workers.beer_call_worker
 
