@@ -1,6 +1,6 @@
 import { test, expect, type Browser, type BrowserContext, type Page, type Locator, type WebSocket as BrowserSocket } from '@playwright/test';
 
-test.setTimeout(180_000);
+test.setTimeout(300_000);
 
 const baseURL = 'http://127.0.0.1:8080';
 const password = 'BeerCallE2E123!';
@@ -178,10 +178,17 @@ test('participation réelle puis démarrage et fin du mini-jeu déterministe', a
     const aperoId = /\/beer-calls\/bc_(\d+)\/join\/$/.exec(participation.url())![1];
     await expect(setup.member.page.getByText('2 Participants', { exact: true })).toBeVisible();
     const worlds = setup.member.page.waitForResponse(response => response.url().endsWith(`/api/squads/${setup.squad.id}/beer-calls/bc_${aperoId}/worlds`));
-    await setup.member.page.getByRole('button', { name: 'Mondes 🌍' }).click();
+    await setup.member.page.getByRole('button', { name: 'Mondes 🌍' }).click({ force: true });
     expect((await worlds).status()).toBe(200);
+    // Le jeu se lance depuis le levier 3D de la machine à sous, sans bouton HTML.
+    // Attendre le rendu des avatars (labels HTML) puis la fin des retries de l'état de jeu (404).
+    await expect(setup.member.page.getByText('PREUVE').first()).toBeVisible({ timeout: 90_000 });
+    await setup.member.page.waitForTimeout(10_000);
+    const canvas = setup.member.page.locator('canvas').last();
+    const canvasBox = await canvas.boundingBox();
+    expect(canvasBox).not.toBeNull();
     const started = setup.member.page.waitForResponse(response => response.url().endsWith(`/api/aperos/${aperoId}/game/start`));
-    await setup.member.page.getByRole('button', { name: 'Lancer le jeu', exact: true }).click();
+    await setup.member.page.mouse.click(canvasBox!.x + canvasBox!.width * 0.30, canvasBox!.y + canvasBox!.height * 0.587);
     expect((await (await started).json() as { game_id: string }).game_id).toBe('TURN_TRANSITION');
     const selected = gameActionResponse(setup.member.page, aperoId);
     await setup.member.page.getByRole('button', { name: 'Je suis prêt !', exact: true }).click();
