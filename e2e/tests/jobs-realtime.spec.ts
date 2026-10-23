@@ -79,7 +79,14 @@ function refreshed(page: Page, socket: BrowserSocket, action: string) {
   // Suivre aussi les reconnexions réelles du hook, pas seulement le premier socket.
   return new Promise<void>(resolve => {
     const attach = (current: BrowserSocket) => current.on('framereceived', frame => {
-      const payload = JSON.parse(frame.payload.toString()) as { type: string; action: string };
+      const text = frame.payload.toString();
+      if (text === 'PONG') return;
+      let payload: { type: string; action: string };
+      try {
+        payload = JSON.parse(text) as { type: string; action: string };
+      } catch {
+        return;
+      }
       if (payload.type === 'REFRESH_SQUAD' && payload.action === action) {
         page.off('websocket', attach);
         resolve();
