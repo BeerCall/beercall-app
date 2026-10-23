@@ -37,7 +37,8 @@ for (const activation of ['touch', 'keyboard'] as const) {
       ],
     });
     await context.addInitScript(() => {
-      if (window.location.origin !== 'http://127.0.0.1:4173') return;
+      // 8080 = stack Docker E2E (CI), 4173 = preview Vite local (playwright.ux.config.ts).
+      if (!['8080', '4173'].includes(window.location.port)) return;
       // Accelerate only the job's 20-minute deadline. Leave Date, performance,
       // requestAnimationFrame, polling and all other timers native: a global clock
       // jump leaves Framer Motion's exiting sheet attached and spoils the recipe.

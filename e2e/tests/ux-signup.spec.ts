@@ -48,7 +48,7 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }
               payloads.push(route.request().postDataJSON() as unknown);
               await route.fulfill({ status: payloads.length === 1 ? 500 : 200,
                 json: payloads.length === 1 ? { detail: 'Panne simulée, réessaie' }
-                  : { access_token: 'signup-fixture-token', username: 'FixtureUser' } });
+                  : { access_token: 'signup-fixture-token', refresh_token: 'signup-fixture-refresh-token', username: 'FixtureUser' } });
             },
           },
         ],

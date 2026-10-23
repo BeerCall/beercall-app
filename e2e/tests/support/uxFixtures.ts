@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { expect, type BrowserContext, type Route } from '@playwright/test';
-import type { BeerCall, Squad, SquadDetails } from '../../../../beercall-frontend/src/types/api';
-import type { ShopItem, UserProfile } from '../../../../beercall-frontend/src/hooks/useProfile';
+import type { BeerCall, Squad, SquadDetails } from '../../../beercall-frontend/src/types/api';
+import type { ShopItem, UserProfile } from '../../../beercall-frontend/src/hooks/useProfile';
 
 export const ANIMATIONS_SHA256 = 'b455d642cd874130c3aba3ae03b207cc67c1817af3881cfbc3877e0921748d6e';
 export const fixtureAvatar: UserProfile['avatar'] = {
@@ -66,7 +66,7 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
   };
   let animations: Buffer | undefined;
   if (options.assets) {
-    animations = await readFile(resolve(process.cwd(), '../../beercall-backend/static/models/Animations.fbx'));
+    animations = await readFile(resolve(process.cwd(), '../beercall-backend/static/models/Animations.fbx'));
     assetHits.hash = createHash('sha256').update(animations).digest('hex');
     expect(assetHits.hash, 'FBX local vérifié, sans téléchargement').toBe(ANIMATIONS_SHA256);
   }
@@ -80,7 +80,8 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
   context.pages().forEach(attachPage);
   context.on('page', attachPage);
   await context.addInitScript(({ authenticated }) => {
-    if (window.location.origin !== 'http://127.0.0.1:4173') return;
+    // 8080 = stack Docker E2E (CI), 4173 = preview Vite local (playwright.ux.config.ts).
+    if (!['8080', '4173'].includes(window.location.port)) return;
     localStorage.clear();
     if (authenticated) {
       localStorage.setItem('user-storage', JSON.stringify({ state: { isAuthenticated: true, username: 'FixtureUser' }, version: 0 }));

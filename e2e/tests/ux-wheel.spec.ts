@@ -151,24 +151,16 @@ for (const width of [320, 390]) {
       await expect(page.getByRole('region').getByText('Page 1/4', { exact: true })).toBeVisible();
       await navigateToPage(page, Math.floor((squad.id - 900001) / 3));
       const trigger = page.getByRole('button', { name: squad.name, exact: true });
+      await expect(trigger).toHaveAttribute('aria-label', squad.name);
       await trigger.tap();
-      const dialog = page.getByRole('dialog', { name: 'Ouvrir cette squad ?' });
-      await expect(dialog.getByText(squad.name, { exact: true })).toBeVisible();
-      await expect(page).toHaveURL('/squad/900001');
-      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      await dialog.getByRole('button', { name: 'Annuler', exact: true }).tap();
-      await expect(trigger).toBeFocused();
-      await trigger.tap();
-      await dialog.getByText(squad.name, { exact: true }).scrollIntoViewIfNeeded();
-      await dialog.getByRole('button', { name: 'Ouvrir la squad', exact: true }).tap();
       await expect(page).toHaveURL(`/squad/${squad.id}`);
-      await expect(dialog).toHaveCount(0);
+      await expect(page.getByRole('dialog')).toHaveCount(0);
       isolation.assertIsolated();
     });
   }
 }
 
-test('ID courant en page 4, navigation clavier, confinement du focus et Escape', async ({ context, page }) => {
+test('ID courant en page 4, navigation clavier directe sans dialogue', async ({ context, page }) => {
   const squads = makeSquads(12);
   const isolation = await installUxFixtures(context, { squads, currentSquadId: 900012 });
   await page.goto('/squad/900012');
@@ -178,25 +170,16 @@ test('ID courant en page 4, navigation clavier, confinement du focus et Escape',
   await expect(trigger).toHaveAttribute('aria-current', 'page');
   await trigger.focus();
   await page.keyboard.press('Enter');
-  const cancel = page.getByRole('button', { name: 'Annuler', exact: true });
-  const confirm = page.getByRole('button', { name: 'Ouvrir la squad', exact: true });
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Shift+Tab');
-  await expect(confirm).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(trigger).toBeFocused();
+  await expect(page).toHaveURL('/squad/900012');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await trigger.focus();
   await page.keyboard.press('ArrowLeft');
   await expect(wheel.getByText('Page 3/4', { exact: true })).toBeVisible();
   const next = wheel.getByRole('button', { name: squads[6].name, exact: true });
   await next.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('dialog').getByText(squads[6].name, { exact: true })).toBeVisible();
-  await page.keyboard.press('Tab');
-  await expect(confirm).toBeFocused();
-  await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`/squad/${squads[6].id}`);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   isolation.assertIsolated();
 });
 
