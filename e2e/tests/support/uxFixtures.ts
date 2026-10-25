@@ -9,6 +9,12 @@ export const ANIMATIONS_SHA256 = 'b455d642cd874130c3aba3ae03b207cc67c1817af3881c
 
 export type AnimationProtocol = 'legacy' | 'packs';
 
+export function getHdrExpectation(): 'required' | 'absent' {
+  const value = process.env.BEERCALL_EXPECT_HDR ?? 'required';
+  if (value !== 'required' && value !== 'absent') throw new Error(`Protocole HDR inconnu : ${value}`);
+  return value;
+}
+
 export function getAnimationProtocol(): AnimationProtocol {
   const envVal = process.env.BEERCALL_EXPECT_ANIMATION_PROTOCOL;
   if (!envVal) return 'packs';
@@ -205,6 +211,10 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
     }
     if (path.endsWith('/potsdamer_platz_1k.hdr') && options.assets) {
       assetHits.hdr++;
+      if (getHdrExpectation() === 'absent') {
+        failures.push('HDR interdit dans le build optimisé');
+        return route.abort();
+      }
       return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: hdr });
     }
     if (path.startsWith('/models/')) {
@@ -283,9 +293,14 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
       expect(failures, 'Aucune requête non simulée').toEqual([]);
       expect(pageErrors, 'Aucune erreur applicative').toEqual([]);
     },
+    async assertHdr() {
+      if (getHdrExpectation() === 'required') await expect.poll(() => hdrHits).toBeGreaterThan(0);
+      else expect(hdrHits, 'Aucun HDR dans le build optimisé').toBe(0);
+    },
     assertAssets(expectedProtocol?: AnimationProtocol) {
       const protocol = expectedProtocol ?? getAnimationProtocol();
-      expect(hdrHits, 'HDR mémoire intercepté').toBeGreaterThan(0);
+      if (getHdrExpectation() === 'required') expect(hdrHits, 'HDR mémoire intercepté').toBeGreaterThan(0);
+      else expect(hdrHits, 'Aucun HDR dans le build optimisé').toBe(0);
       if (protocol === 'legacy') {
         expect(fbxHash, 'Hash FBX vérifié').toBe(ANIMATIONS_SHA256);
         expect(rawFbxHits, 'Animations FBX interceptées (protocole legacy)').toBeGreaterThan(0);

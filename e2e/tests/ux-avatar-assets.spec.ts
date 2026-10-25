@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { ANIMATIONS_SHA256, getAnimationProtocol, installUxFixtures } from './support/uxFixtures';
+import { ANIMATIONS_SHA256, getAnimationProtocol, getHdrExpectation, installUxFixtures } from './support/uxFixtures';
 
 test.use({ viewport: { width: 390, height: 844 } });
 
@@ -24,7 +24,7 @@ test('profil propre : vestiaire et Idle provenant du protocole configuré', asyn
     await expect.poll(() => isolation.assetHits.manifest).toBeGreaterThan(0);
     await expect.poll(() => isolation.assetHits.idle).toBeGreaterThan(0);
   }
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -45,7 +45,7 @@ test('profil tiers : informations sans action vestiaire, assets toujours isolés
     await expect.poll(() => isolation.assetHits.manifest).toBeGreaterThan(0);
     await expect.poll(() => isolation.assetHits.idle).toBeGreaterThan(0);
   }
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -94,5 +94,22 @@ test('validation protocole : seules les valeurs legacy ou packs sont acceptées'
   } finally {
     if (prev !== undefined) process.env.BEERCALL_EXPECT_ANIMATION_PROTOCOL = prev;
     else delete process.env.BEERCALL_EXPECT_ANIMATION_PROTOCOL;
+  }
+});
+
+test('validation HDR : absence explicite optimisée, présence historique et refus des valeurs inconnues', () => {
+  const previous = process.env.BEERCALL_EXPECT_HDR;
+  try {
+    process.env.BEERCALL_EXPECT_HDR = 'absent';
+    expect(getHdrExpectation()).toBe('absent');
+    process.env.BEERCALL_EXPECT_HDR = 'required';
+    expect(getHdrExpectation()).toBe('required');
+    process.env.BEERCALL_EXPECT_HDR = 'ignore';
+    expect(() => getHdrExpectation()).toThrow(/Protocole HDR inconnu/);
+    delete process.env.BEERCALL_EXPECT_HDR;
+    expect(getHdrExpectation()).toBe('required');
+  } finally {
+    if (previous === undefined) delete process.env.BEERCALL_EXPECT_HDR;
+    else process.env.BEERCALL_EXPECT_HDR = previous;
   }
 });
