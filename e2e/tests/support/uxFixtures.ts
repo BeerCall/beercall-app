@@ -10,7 +10,7 @@ export const ANIMATIONS_SHA256 = 'b455d642cd874130c3aba3ae03b207cc67c1817af3881c
 export type AnimationProtocol = 'legacy' | 'packs';
 
 export function getHdrExpectation(): 'required' | 'absent' {
-  const value = process.env.BEERCALL_EXPECT_HDR ?? 'required';
+  const value = process.env.BEERCALL_EXPECT_HDR ?? 'absent';
   if (value !== 'required' && value !== 'absent') throw new Error(`Protocole HDR inconnu : ${value}`);
   return value;
 }

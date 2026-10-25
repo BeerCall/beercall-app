@@ -107,7 +107,7 @@ test('validation HDR : absence explicite optimisée, présence historique et ref
     process.env.BEERCALL_EXPECT_HDR = 'ignore';
     expect(() => getHdrExpectation()).toThrow(/Protocole HDR inconnu/);
     delete process.env.BEERCALL_EXPECT_HDR;
-    expect(getHdrExpectation()).toBe('required');
+    expect(getHdrExpectation()).toBe('absent');
   } finally {
     if (previous === undefined) delete process.env.BEERCALL_EXPECT_HDR;
     else process.env.BEERCALL_EXPECT_HDR = previous;
