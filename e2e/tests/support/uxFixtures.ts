@@ -153,12 +153,14 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
   } | undefined;
 
   if (options.assets) {
-    const backendFbx = resolve(process.cwd(), '../beercall-backend/static/models/Animations.fbx');
+    const backendRoot = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
+    const backendFbx = resolve(backendRoot, 'static/models/Animations.fbx');
     animations = await readFile(backendFbx);
     fbxHash = createHash('sha256').update(animations).digest('hex');
     expect(fbxHash, 'FBX local vérifié, sans téléchargement').toBe(ANIMATIONS_SHA256);
 
-    const animDir = resolve(process.cwd(), '../beercall-frontend/public/animations');
+    const frontendRoot = process.env.BEERCALL_WORKSPACE_FRONTEND ?? resolve(process.cwd(), '../beercall-frontend');
+    const animDir = resolve(frontendRoot, 'public/animations');
     manifestBuffer = await readFile(resolve(animDir, 'manifest.json'));
     manifestHash = createHash('sha256').update(manifestBuffer).digest('hex');
     manifest = JSON.parse(manifestBuffer.toString('utf8'));
