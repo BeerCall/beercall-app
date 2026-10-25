@@ -122,6 +122,37 @@ test.describe('Stabilité 3D - Navigation répétée 30 amis / Carte (REL-01)', 
       expect(pageErrors).toHaveLength(0);
     }
   });
+
+  test('essai séparé: perte/restauration volontaire via WEBGL_lose_context si disponible', async ({ context, page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', err => pageErrors.push(err.message));
+
+    await installUxFixtures(context, {
+      profileMode: 'own',
+      assets: true,
+    });
+
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+
+    const loseContextResult = await page.evaluate(async () => {
+      const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
+      if (!canvas) return { available: false, reason: 'no canvas' };
+      const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as WebGLRenderingContext | null;
+      if (!gl) return { available: false, reason: 'no webgl context' };
+      const ext = gl.getExtension('WEBGL_lose_context');
+      if (!ext) return { available: false, reason: 'extension not supported' };
+
+      ext.loseContext();
+      await new Promise(r => setTimeout(r, 200));
+      ext.restoreContext();
+      await new Promise(r => setTimeout(r, 200));
+      return { available: true };
+    });
+
+    console.log(`[T14f WEBGL_lose_context] Résultat:`, loseContextResult);
+    expect(pageErrors).toHaveLength(0);
+  });
 });
 
 declare global {
