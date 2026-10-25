@@ -1,0 +1,30 @@
+import { test, expect } from '@playwright/test';
+import { installUxFixtures } from './support/uxFixtures';
+
+test('diagnostic activable sans barre URL PWA, export local sans données de compte, puis arrêt', async ({ context, page }) => {
+    const isolation = await installUxFixtures(context, { profileMode: 'own', assets: true });
+    await page.goto('/profile');
+    await page.getByRole('button', { name: 'Trophées', exact: true }).click();
+    await page.getByRole('button', { name: 'Diagnostic de fluidité (local)', exact: true }).click();
+    const measurements = page.getByRole('button', { name: 'Mesures', exact: true });
+    await expect(measurements).toBeVisible();
+    await measurements.click();
+    await expect(page.getByRole('region', { name: 'Diagnostic de fluidité' })).toBeVisible();
+    const downloading = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Exporter le relevé JSON' }).click();
+    const stream = await (await downloading).createReadStream();
+    if (!stream) throw new Error('Export JSON absent');
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    const text = Buffer.concat(chunks).toString('utf8');
+    const report = JSON.parse(text);
+    expect(report.schemaVersion).toBe(1);
+    expect(Array.isArray(report.modelDecodes)).toBe(true);
+    expect(text).not.toContain('FixtureUser');
+    expect(text).not.toContain('ux-fixture-token');
+    expect(text).not.toContain('/api/');
+    await page.getByRole('button', { name: 'Arrêter le diagnostic' }).click();
+    await expect(measurements).toHaveCount(0);
+    expect(await page.evaluate(() => sessionStorage.getItem('beercall:perf'))).toBeNull();
+    isolation.assertIsolated();
+});

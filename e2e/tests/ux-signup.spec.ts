@@ -91,7 +91,7 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }
         return !!action && el.getBoundingClientRect().bottom < action.getBoundingClientRect().top;
       })).toBe(true);
       await expect.poll(() => isolation.assetHits.fbx).toBeGreaterThan(0);
-      await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+      await isolation.assertHdr();
       await assertInViewportAndTappable(button, viewport.height);
       await button.tap();
       await expect(page.getByRole('alert')).toHaveText('Panne simulée, réessaie');

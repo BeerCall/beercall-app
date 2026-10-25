@@ -5,6 +5,15 @@ test.use({ viewport: { width: 390, height: 844 }, trace: 'off' });
 
 async function measurePair(locator: Locator, label: string, allowComposite = false) {
   await expect(locator, `Paire présente : ${label}`).toBeVisible();
+  // Check the final state, not a partially interpolated background/opacity.
+  // The contrast thresholds and strict opaque-surface assertions below stay unchanged.
+  await expect.poll(() => locator.evaluate(el => {
+    for (let node: Element | null = el; node; node = node.parentElement) {
+      if (Number(getComputedStyle(node).opacity) !== 1 ||
+          node.getAnimations().some(animation => animation.playState === 'running')) return false;
+    }
+    return true;
+  }), { message: `Transition terminée : ${label}` }).toBe(true);
   const pair = await locator.evaluate((el, composite) => {
     if (el.closest(':disabled, [aria-disabled="true"]')) throw new Error('Une paire disabled ne certifie pas un état actif');
     const canvas = document.createElement('canvas');
@@ -160,7 +169,7 @@ test('profil propre : sous-titre, article équipé, badges et rang', async ({ co
   await measurePair(page.getByText('Rang test', { exact: true }), 'Profil rang');
   const idle = await loadedIdle(page);
   await expect(idle).toHaveClass(/border-beer/);
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -174,7 +183,7 @@ test('profil propre : animation Idle sélectionnée et Aucun', async ({ context,
   await page.getByRole('button', { name: /Accessoire$/ }).tap();
   await expect(page.getByRole('button', { name: /Aucun/ })).toHaveClass(/border-beer/);
   await measureWardrobe(page.getByText('Aucun', { exact: true }), 'Profil Aucun sélectionné');
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -188,7 +197,7 @@ test('signup : sous-titre, tenue initiale et article à essayer', async ({ conte
   await measureWardrobe(page.getByText('À essayer', { exact: true }), 'Signup À essayer');
   await expect(page.getByText('Possédé', { exact: true })).toHaveCount(0);
   await loadedIdle(page);
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -208,7 +217,7 @@ test('signup : genres sélectionné/inactif, dans les deux états', async ({ con
   await measurePair(men, 'Signup Homme inactif');
   await expect(page.getByText('Sans couvre-chef', { exact: true })).toHaveCount(0);
   await loadedIdle(page);
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -223,7 +232,7 @@ test('signup : Idle choisi depuis le FBX et Aucun', async ({ context, page }) =>
   await page.getByRole('button', { name: /Accessoire$/ }).tap();
   await expect(page.getByRole('button', { name: /Aucun/ })).toHaveClass(/border-beer/);
   await measureWardrobe(page.getByText('Aucun', { exact: true }), 'Signup Aucun sélectionné');
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
@@ -236,7 +245,7 @@ test('profil tiers : rang et informations, sans vestiaire fictif', async ({ cont
   await expect(page.getByRole('heading', { name: 'Vestiaire', exact: true })).toHaveCount(0);
   await measurePair(page.getByText('Rang test', { exact: true }), 'Profil tiers rang');
   await expect.poll(() => isolation.assetHits.fbx).toBeGreaterThan(0);
-  await expect.poll(() => isolation.assetHits.hdr).toBeGreaterThan(0);
+  await isolation.assertHdr();
   isolation.assertAssets();
   isolation.assertIsolated();
 });
