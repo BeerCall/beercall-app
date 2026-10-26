@@ -35,6 +35,9 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:8080',
     trace: 'retain-on-failure',
+    // Heure locale déterministe : les contrats de palette jour/nuit ne doivent
+    // pas dépendre du fuseau de la machine qui exécute le runner mobile.
+    timezoneId: 'Europe/Paris',
   },
   projects: [
     {

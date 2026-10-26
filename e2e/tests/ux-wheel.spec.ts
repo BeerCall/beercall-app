@@ -35,9 +35,19 @@ async function assertWheelGeometry(wheel: Locator) {
       if (label.scrollWidth > Math.ceil(label.clientWidth) + 1) {
         issues.push(`ScrollWidth caché dans label : ${label.textContent}`);
       }
-      const bg = getComputedStyle(label).backgroundColor;
-      if (!bg.startsWith('rgb(255, 255, 255)') && !bg.startsWith('rgba(255, 255, 255, 1)')) {
-        issues.push(`Fond non opaque sur label : ${label.textContent} (${bg})`);
+      const style = getComputedStyle(label);
+      // Nouvelle direction v5.2 : plus aucun fond opaque blanc, la lisibilité vient
+      // de la couleur calculée et de l'ombre, pas d'un rectangle.
+      if (style.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+        issues.push(`Fond non transparent sur label : ${label.textContent} (${style.backgroundColor})`);
+      }
+      const identityLabel = document.querySelector<HTMLElement>('[data-dashboard-identity] h2');
+      const expected = identityLabel ? getComputedStyle(identityLabel).color : null;
+      if (expected ? style.color !== expected : !['rgb(16, 24, 40)', 'rgb(251, 191, 36)'].includes(style.color)) {
+        issues.push(`Couleur de label désynchronisée du badge : ${label.textContent} (${style.color})`);
+      }
+      if (style.textShadow === 'none' && style.filter === 'none') {
+        issues.push(`Halo/ombre manquant sur label : ${label.textContent}`);
       }
       for (const other of [...labels.slice(i + 1), ...buttons, ...zones]) {
         if (intersection(rect(label), rect(other)) > 0) issues.push(`Collision du label : ${label.textContent}`);
@@ -270,6 +280,19 @@ test('gaps réels cartes/roue/barre et fond opaque en jour/nuit avec captures', 
   const wheel = page.getByRole('region', { name: 'Navigation des squads' });
   await expect(wheel).toBeVisible();
   await assertWheelGeometry(wheel);
+  const dayLabel = await wheel.locator('[data-wheel-label]').first().evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      decorated: style.textShadow !== 'none' || style.filter !== 'none',
+    };
+  });
+  const dayIdentityColor = await page.locator('[data-dashboard-identity] h2').evaluate(el => getComputedStyle(el).color);
+  expect(dayLabel.color, 'label jour synchronisé avec le badge').toBe(dayIdentityColor);
+  await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-gray-900/);
+  expect(dayLabel.background, 'aucun rectangle opaque de jour').toBe('rgba(0, 0, 0, 0)');
+  expect(dayLabel.decorated, 'halo clair de jour').toBe(true);
 
   // Mesurer cartes/roue=4 px ±1 et roue/barre=0 px
   const gaps = await wheel.evaluate(el => {
@@ -296,6 +319,20 @@ test('gaps réels cartes/roue/barre et fond opaque en jour/nuit avec captures', 
   await page.reload();
   await expect(wheel).toBeVisible();
   await assertWheelGeometry(wheel);
+  const nightLabel = await wheel.locator('[data-wheel-label]').first().evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      decorated: style.textShadow !== 'none' || style.filter !== 'none',
+    };
+  });
+  const nightIdentityColor = await page.locator('[data-dashboard-identity] h2').evaluate(el => getComputedStyle(el).color);
+  expect(nightLabel.color, 'label nuit synchronisé avec le badge').toBe(nightIdentityColor);
+  await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-beer-light/);
+  expect(nightLabel.color, 'label nuit en beer-light (#FBBF24)').toBe('rgb(251, 191, 36)');
+  expect(nightLabel.background, 'aucun rectangle opaque de nuit').toBe('rgba(0, 0, 0, 0)');
+  expect(nightLabel.decorated, 'ombre sombre de nuit').toBe(true);
 
   // Capture nuit
   await page.screenshot({ path: resolve(resultsDir, 'wheel-night.png') });

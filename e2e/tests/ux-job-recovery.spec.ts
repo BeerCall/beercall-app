@@ -75,31 +75,41 @@ for (const activation of ['touch', 'keyboard'] as const) {
       Object.defineProperty(navigator, 'geolocation', { configurable: true, value: geolocation });
     });
     await page.goto('/squad/900001');
-    const cached = page.getByRole('button', { name: 'Position mémorisée — création indisponible', exact: true });
-    await expect(cached).toHaveAttribute('aria-disabled', 'true');
-    const rect = await cached.boundingBox();
-    expect(rect).not.toBeNull();
-    expect(await cached.evaluate(el => {
-      const r = el.getBoundingClientRect();
-      return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
-    }), 'Le tap vise réellement le marqueur, sans force').toBe(true);
-    await page.touchscreen.tap(rect!.x + rect!.width / 2, rect!.y + rect!.height / 2);
-    await cached.focus();
-    await cached.press('Enter');
-    await cached.press('Space');
+    // Cache seul, sans fix live : aucun joueur cliquable et aucun texte GPS dans le badge.
+    await expect(page.getByRole('button', { name: 'Créer un Beer Call', exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Position mémorisée/)).toHaveCount(0);
     expect(await page.evaluate(() => window.uxJobPhotoClicks)).toBe(0);
-    await expect(page.getByText(/Position mémorisée — ancienneté inconnue/).last()).toBeVisible();
 
-    await page.getByRole('button', { name: 'Réessayer le GPS', exact: true }).tap();
+    const retry = page.getByRole('button', { name: 'Relancer la localisation', exact: true });
+    await expect(retry).toBeVisible();
+    // Tailwind v4 sérialise gray-100 en oklch : on vérifie la classe source
+    // (palette grisée) plutôt qu'une conversion rgb fragile.
+    await expect(retry).toHaveClass(/bg-gray-100/);
+    const refresh = retry.locator('svg.lucide-refresh-cw');
+    await expect(refresh).toBeVisible();
+    await expect(refresh).toHaveClass(/text-beer-light/);
+    await expect(refresh).toHaveCSS('color', 'rgb(251, 191, 36)');
+    expect(await page.evaluate(() => window.uxJobGpsWatches.length)).toBe(1);
+
+    // Tap natif : le bouton grisé relance explicitement startTracking().
+    await retry.tap();
+    await expect.poll(() => page.evaluate(() => window.uxJobGpsWatches.length)).toBe(2);
     await page.evaluate(() => window.uxJobGpsWatches.at(-1)!.success({
       coords: { latitude: 48.8566, longitude: 2.34, accuracy: 1, altitude: null, altitudeAccuracy: null, heading: null, speed: null },
       timestamp: Date.now(),
     } as GeolocationPosition));
+
     const current = page.getByRole('button', { name: 'Créer un Beer Call', exact: true });
-    await expect(current).toHaveAttribute('aria-disabled', 'false');
+    await expect(current).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Me recentrer', exact: true })).toBeVisible();
+    await expect(retry).toHaveCount(0);
     const chooser = page.waitForEvent('filechooser');
-    await current.focus();
-    await current.press('Enter');
+    if (activation === 'touch') {
+      await current.tap();
+    } else {
+      await current.focus();
+      await current.press('Enter');
+    }
     const fileChooser = await chooser;
     expect(await page.evaluate(() => window.uxJobPhotoClicks)).toBe(1);
     const image = await page.evaluate(() => {
