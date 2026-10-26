@@ -97,7 +97,7 @@ for (const color of ['#F59E0B', '#EF4444', '#10B981', '#3B82F6', '#8B5CF6', '#EC
     await expect(heading.locator('xpath=../..'), 'Couleur API exacte après la transition CSS')
       .toHaveCSS('border-top-color', `rgba(${rgb.join(', ')}, 0.25)`);
     // Deuxième rangée du badge : le code d'invitation reste lisible sur la même surface.
-    const code = page.getByRole('button', { name: `Copier le code ${squads[0].invite_code}`, exact: true });
+    const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
     const codePair = await measurePair(code.locator('span').first(), `Code invitation ${color}`);
     expect(codePair.foreground.slice(0, 3)).toEqual([16, 24, 40]);
     expect(codePair.background.slice(0, 3)).toEqual([255, 255, 255]);
@@ -112,7 +112,7 @@ test('badge jour : deux rangées distinctes et code d invitation copiable', asyn
   await page.goto('/squad/900001');
 
   const heading = page.getByRole('heading', { name: squads[0].name, exact: true });
-  const code = page.getByRole('button', { name: `Copier le code ${squads[0].invite_code}`, exact: true });
+  const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
   await expect(heading).toBeVisible();
   await expect(code).toBeVisible();
 
@@ -142,7 +142,7 @@ test.describe('Badge haut opaque : jour et nuit', () => {
       expect(await page.evaluate(() => new Date().getHours())).toBe(theme.hour);
 
       const heading = page.getByRole('heading', { name: squads[0].name, exact: true });
-      const code = page.getByRole('button', { name: `Copier le code ${squads[0].invite_code}`, exact: true });
+      const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
       const headingPair = await measurePair(heading, `Badge ${theme.label} titre`);
       const codePair = await measurePair(code.locator('span').first(), `Badge ${theme.label} code`);
       expect(headingPair.foreground.slice(0, 3)).toEqual(theme.foreground);
