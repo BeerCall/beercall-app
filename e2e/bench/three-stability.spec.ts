@@ -1,157 +1,303 @@
-import { test, expect } from '@playwright/test';
-import { installUxFixtures } from '../tests/support/uxFixtures';
+import { test, expect, type Page } from '@playwright/test';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import {
+  assertBoundedGrowth,
+  assertFrames,
+  assertModelWhitelist,
+  assertSingleDocument,
+  installStabilityFixtures,
+} from './support/stabilityFixtures';
 
-const PHASE = process.env.BEERCALL_STABILITY_PHASE ?? 'baseline';
+const PHASE = process.env.BEERCALL_STABILITY_PHASE === 'verify' ? 'verify' : 'baseline';
+const TOTAL_CYCLES = Number(process.env.BEERCALL_STABILITY_CYCLES ?? 40);
+const WARMUP_CYCLES = Math.min(10, TOTAL_CYCLES - 1);
+const resultsDir = process.env.BEERCALL_USAGE_RESULTS ?? resolve(process.cwd(), 'test-results');
 
-const MOCK_CONNECTIONS = Array.from({ length: 30 }, (_, i) => ({
-  id: `conn_${i + 1}`,
-  username: `Camarade_${i + 1}`,
-  caps: (i + 1) * 10,
-  score: (i + 1) * 100,
-  title: i % 2 === 0 ? 'Vétéran du Bar' : 'Novice de l’Apéro',
-  avatar: {
-    head: 'head_base',
-    body: i % 3 === 0 ? 'tshirt' : 'suit',
-    legs: i % 2 === 0 ? 'jeans' : 'shorts',
-    feet: 'shoes_sneakers',
-    accessory: i % 5 === 0 ? 'glasses_round' : 'none',
-    gender: (i % 2 === 0 ? 'Men' : 'Women') as 'Men' | 'Women',
-  },
-}));
+async function installMetrics(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const metrics = {
+      contextsCreated: 0,
+      contextsLost: 0,
+      contextsRestored: 0,
+      drawCalls: 0,
+    };
+    window.__stabilityMetrics = metrics;
+    const seenContexts = new WeakSet<object>();
+    const contextCanvas = new WeakMap<object, HTMLCanvasElement>();
+    const canvasDraws = new WeakMap<HTMLCanvasElement, number>();
+    window.__stabilityCanvasDraws = (canvas: HTMLCanvasElement) => canvasDraws.get(canvas) ?? 0;
 
-test.describe('Stabilité 3D - Navigation répétée 30 amis / Carte (REL-01)', () => {
-  test('reproduction et diagnostic de stabilité sur 40 cycles', async ({ context, page }) => {
-    test.setTimeout(300_000);
+    const originalGetContext = HTMLCanvasElement.prototype.getContext as (...args: unknown[]) => unknown;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args: unknown[]) {
+      const context = originalGetContext.apply(this, args);
+      if (context && this && typeof this.addEventListener === 'function' && (args[0] === 'webgl' || args[0] === 'webgl2')) {
+        const object = context as object;
+        contextCanvas.set(object, this);
+        if (!seenContexts.has(object)) {
+          seenContexts.add(object);
+          metrics.contextsCreated++;
+          this.addEventListener('webglcontextlost', () => { metrics.contextsLost++; });
+          this.addEventListener('webglcontextrestored', () => { metrics.contextsRestored++; });
+        }
+      }
+      return context;
+    } as typeof HTMLCanvasElement.prototype.getContext;
 
-    const pageErrors: string[] = [];
+    const wrappedFunctions = new WeakSet<object>();
+    const instrument = (prototype: object | undefined, method: string) => {
+      if (!prototype) return;
+      const record = prototype as Record<string, unknown>;
+      const original = record[method];
+      if (typeof original !== 'function' || wrappedFunctions.has(original as object)) return;
+      wrappedFunctions.add(original as object);
+      record[method] = function (this: object, ...args: unknown[]) {
+        const canvas = contextCanvas.get(this);
+        if (canvas) canvasDraws.set(canvas, (canvasDraws.get(canvas) ?? 0) + 1);
+        metrics.drawCalls++;
+        return (original as (...inner: unknown[]) => unknown).apply(this, args);
+      };
+    };
+    for (const prototype of [window.WebGLRenderingContext?.prototype, window.WebGL2RenderingContext?.prototype]) {
+      for (const method of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced']) {
+        instrument(prototype, method);
+      }
+    }
+
+    window.__stabilitySetDocumentHidden = (hidden: boolean) => {
+      const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+      if (!descriptor?.configurable) return false;
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+      document.dispatchEvent(new Event('visibilitychange'));
+      return true;
+    };
+  });
+}
+
+async function waitForDashboard(page: Page) {
+  const mapCanvas = page.locator('div.maplibregl-map canvas.maplibregl-canvas').first();
+  await expect(mapCanvas).toBeVisible({ timeout: 45_000 });
+  await mapCanvas.evaluate((canvas) => canvas.setAttribute('data-stability-map', 'map-1'));
+  await expect.poll(
+    () => mapCanvas.evaluate((canvas) => window.__stabilityCanvasDraws(canvas)),
+    { timeout: 30_000, message: 'La carte doit soumettre au moins une frame WebGL' },
+  ).toBeGreaterThan(0);
+  await expect.poll(
+    () => page.evaluate(() => Boolean(window.__beercall_scene_metrics?.avatarFrameSubmitted)),
+    { timeout: 30_000, message: 'Le joueur doit soumettre une frame réelle' },
+  ).toBe(true);
+  return mapCanvas;
+}
+
+async function openConnections(page: Page) {
+  await page.getByRole('button', { name: 'Connexions' }).click();
+  await expect(page.getByRole('heading', { name: 'Connexions' })).toBeVisible({ timeout: 15_000 });
+  const list = page.locator('div.flex-1.overflow-y-auto').first();
+  await expect(list).toBeVisible();
+  return list;
+}
+
+async function backToDashboard(page: Page) {
+  await page.locator('header button').first().click();
+  await expect(page.locator('div.maplibregl-map')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('canvas[data-stability-map="map-1"]')).toHaveCount(1);
+}
+
+test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL-01)', () => {
+  test('banc SPA 40 cycles sans rechargement de document', async ({ context, page }) => {
+    test.setTimeout(900_000);
+    await installMetrics(page);
+
     const webglWarnings: string[] = [];
-    page.on('pageerror', err => pageErrors.push(err.message));
-    page.on('console', msg => {
-      const text = msg.text();
+    const documentRequests: string[] = [];
+    page.on('console', (message) => {
+      const text = message.text();
       if (text.includes('WARNING: Too many active WebGL contexts') || text.includes('CONTEXT_LOST_WEBGL')) {
         webglWarnings.push(text);
       }
     });
-
-    await page.addInitScript(() => {
-      window.__stabilityMetrics = {
-        contextsCreated: 0,
-        contextsLost: 0,
-        contextsRestored: 0,
-        activeCanvases: 0,
-      };
-
-      const origGetContext = HTMLCanvasElement.prototype.getContext;
-      HTMLCanvasElement.prototype.getContext = function (type: string, ...args: any[]) {
-        const ctx = origGetContext.call(this, type, ...args);
-        if (ctx && (type === 'webgl' || type === 'webgl2')) {
-          window.__stabilityMetrics.contextsCreated++;
-          this.addEventListener('webglcontextlost', () => {
-            window.__stabilityMetrics.contextsLost++;
-          });
-          this.addEventListener('webglcontextrestored', () => {
-            window.__stabilityMetrics.contextsRestored++;
-          });
-        }
-        return ctx;
-      } as any;
+    page.on('request', (request) => {
+      if (request.resourceType() === 'document') documentRequests.push(request.url());
     });
+    let currentCycle = 0;
+    page.on('pageerror', (error) => console.log(`[T20 pageerror cycle ${currentCycle}]`, error.stack ?? error.message));
 
-    await installUxFixtures(context, {
-      profileMode: 'own',
-      assets: true,
-      simulations: [
-        {
-          method: 'GET',
-          path: '/api/auth/connections/',
-          respond: async route => {
-            await route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify(MOCK_CONNECTIONS),
-            });
-          },
-        },
-      ],
-    });
-
+    const fixture = await installStabilityFixtures(context);
     await page.goto('/');
     await page.waitForLoadState('domcontentloaded');
+    const mapCanvas = await waitForDashboard(page);
 
-    const cycleCount = PHASE === 'verify' ? 40 : 20;
-    const history: Array<{ cycle: number; contextsCreated: number; contextsLost: number }> = [];
+    const history: Array<{
+      cycle: number;
+      contextsCreated: number;
+      contextsLost: number;
+      contextsRestored: number;
+      drawCalls: number;
+      mapDraws: number;
+      thumbnailDraws: number;
+      backgroundReturn: boolean;
+    }> = [];
 
-    for (let c = 1; c <= cycleCount; c++) {
-      // Aller sur Connexions
-      await page.goto('/connections');
-      await page.waitForLoadState('domcontentloaded');
+    for (let cycle = 1; cycle <= TOTAL_CYCLES; cycle++) {
+      currentCycle = cycle;
+      const varied = cycle > 20;
+      const isFast = varied && cycle <= 25;
+      await openConnections(page);
+      const thumbnails = page.locator('[data-testid^="avatar-thumb-"]');
+      await expect(thumbnails).toHaveCount(30, { timeout: 15_000 });
 
-      const list = page.locator('div.flex-1.overflow-y-auto');
-      if (await list.isVisible()) {
-        // Scroll jusqu'en bas
-        await list.evaluate(el => el.scrollTo({ top: el.scrollHeight, behavior: 'instant' }));
-        await page.waitForTimeout(50);
-        // Remonter en haut
-        await list.evaluate(el => el.scrollTo({ top: 0, behavior: 'instant' }));
-        await page.waitForTimeout(50);
+      const index = varied ? 10 + ((cycle - 21) % 20) : 0;
+      const item = thumbnails.nth(index);
+      await item.scrollIntoViewIfNeeded();
+      await expect(item).toBeVisible();
+      // Laisse le budget de miniatures se stabiliser avant de mesurer les Canvas.
+      await page.waitForTimeout(500);
+
+      const readyThumbnail = page.locator('[data-avatar-framing="ready"] canvas').first();
+      await expect(readyThumbnail).toBeVisible({ timeout: isFast ? 15_000 : 30_000 });
+      await expect.poll(
+        () => page.locator('[data-avatar-framing="loading"]').count(),
+        { timeout: 15_000, message: 'Aucun Canvas de miniature encore en cours de connexion' },
+      ).toBe(0);
+      const thumbnailDraws = await readyThumbnail.evaluate((canvas) => window.__stabilityCanvasDraws(canvas));
+      assertFrames(thumbnailDraws, `Miniature cycle ${cycle}`);
+      // Laisse le Canvas R3F terminer son effet de connexion avant le démontage SPA.
+      await page.waitForTimeout(isFast ? 120 : 300);
+
+      let backgroundReturn = false;
+      if (cycle === 30) {
+        backgroundReturn = await page.evaluate(() => window.__stabilitySetDocumentHidden(true));
+        await page.waitForTimeout(250);
+        backgroundReturn = (await page.evaluate(() => window.__stabilitySetDocumentHidden(false))) && backgroundReturn;
+        await page.waitForTimeout(250);
       }
 
-      // Retour carte
-      await page.goto('/');
-      await page.waitForLoadState('domcontentloaded');
+      await backToDashboard(page);
+      const mapDraws = await mapCanvas.evaluate((canvas) => window.__stabilityCanvasDraws(canvas));
+      assertFrames(mapDraws, `Carte cycle ${cycle}`);
+      const metrics = await page.evaluate(() => window.__stabilityMetrics);
 
-      const metrics = await page.evaluate(() => window.__stabilityMetrics ?? { contextsCreated: 0, contextsLost: 0 });
-      history.push({ cycle: c, contextsCreated: metrics.contextsCreated, contextsLost: metrics.contextsLost });
-
-      // En mode verify, chaque cycle exige zéro crash et zéro écran blanc
-      if (PHASE === 'verify') {
-        expect(pageErrors.length, `Aucun crash JS au cycle ${c}: ${pageErrors.join('; ')}`).toBe(0);
-        const mapContainer = page.locator('div.maplibregl-map, div[aria-label="Carte des apéros"]');
-        await expect(mapContainer.first()).toBeVisible({ timeout: 5000 });
-      }
+      history.push({
+        cycle,
+        contextsCreated: metrics.contextsCreated,
+        contextsLost: metrics.contextsLost,
+        contextsRestored: metrics.contextsRestored,
+        drawCalls: metrics.drawCalls,
+        mapDraws,
+        thumbnailDraws,
+        backgroundReturn,
+      });
     }
 
-    // Sortie diagnostique
-    console.log(`[T14a Diagnostic] Phase=${PHASE}, Cycles=${cycleCount}`);
-    console.log(`[T14a Diagnostic] Total contextes créés: ${history.at(-1)?.contextsCreated}`);
-    console.log(`[T14a Diagnostic] Total contextes perdus: ${history.at(-1)?.contextsLost}`);
-    console.log(`[T14a Diagnostic] Warnings WebGL: ${webglWarnings.length}`);
-    console.log(`[T14a Diagnostic] Erreurs JS: ${pageErrors.length}`);
+    await fixture.assertModels();
+    fixture.isolation.assertIsolated();
+    assertSingleDocument(documentRequests);
+    expect(documentRequests, 'Un seul document, aucune navigation complète').toHaveLength(1);
+    expect(webglWarnings, 'Aucun warning de quota WebGL').toEqual([]);
+    const afterWarmup = history[WARMUP_CYCLES - 1].contextsCreated;
+    const finalMetrics = await page.evaluate(() => window.__stabilityMetrics);
+    const activeContexts = finalMetrics.contextsCreated - finalMetrics.contextsLost;
+
+    const summary = {
+      phase: PHASE,
+      cycles: TOTAL_CYCLES,
+      warmupCycles: WARMUP_CYCLES,
+      finalMetrics,
+      activeContexts,
+      afterWarmupContexts: afterWarmup,
+      documentRequests,
+      webglWarnings,
+      pageErrors: fixture.isolation.pageErrors,
+      modelHits: Object.fromEntries(fixture.modelHits),
+      history,
+    };
+    const output = resolve(resultsDir, `stability-${PHASE}.json`);
+    await mkdir(dirname(output), { recursive: true });
+    await writeFile(output, JSON.stringify(summary, null, 2));
+
+    assertBoundedGrowth(afterWarmup, finalMetrics.contextsCreated, TOTAL_CYCLES - WARMUP_CYCLES);
+    expect(activeContexts, 'Contextes WebGL actifs bornés après échauffement').toBeLessThanOrEqual(4);
 
     if (PHASE === 'verify') {
-      expect(pageErrors).toHaveLength(0);
+      expect(webglWarnings).toHaveLength(0);
+      expect(fixture.isolation.pageErrors).toHaveLength(0);
+      expect(history.every((entry) => entry.mapDraws > 0)).toBe(true);
+      expect(history.every((entry) => entry.thumbnailDraws > 0)).toBe(true);
+      let baseline: { finalMetrics?: { contextsCreated?: number }; history?: unknown[] } | null = null;
+      try {
+        baseline = JSON.parse(await readFile(resolve(resultsDir, 'stability-baseline.json'), 'utf8'));
+      } catch {
+        baseline = null;
+      }
+      if (baseline?.finalMetrics?.contextsCreated !== undefined) {
+        console.log(
+          `[T20] baseline contextes=${baseline.finalMetrics.contextsCreated}, verify=${finalMetrics.contextsCreated}`,
+        );
+      } else {
+        console.log('[T20] baseline absente ou non comparable : vérification sur image courante seulement');
+      }
     }
   });
 
-  test('essai séparé: perte/restauration volontaire via WEBGL_lose_context si disponible', async ({ context, page }) => {
-    const pageErrors: string[] = [];
-    page.on('pageerror', err => pageErrors.push(err.message));
-
-    await installUxFixtures(context, {
-      profileMode: 'own',
-      assets: true,
-    });
-
-    await page.goto('/');
+  test('perte/restauration volontaire du contexte 3D si WEBGL_lose_context existe', async ({ context, page }) => {
+    test.setTimeout(120_000);
+    await installMetrics(page);
+    const fixture = await installStabilityFixtures(context);
+    await page.goto('/profile');
     await page.waitForLoadState('domcontentloaded');
 
-    const loseContextResult = await page.evaluate(async () => {
-      const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
-      if (!canvas) return { available: false, reason: 'no canvas' };
-      const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as WebGLRenderingContext | null;
-      if (!gl) return { available: false, reason: 'no webgl context' };
-      const ext = gl.getExtension('WEBGL_lose_context');
-      if (!ext) return { available: false, reason: 'extension not supported' };
+    const avatarCanvas = page.locator('div[data-testid="safe-avatar-container"] canvas').first();
+    await expect(avatarCanvas).toBeVisible({ timeout: 30_000 });
+    await expect.poll(
+      () => avatarCanvas.evaluate((canvas) => window.__stabilityCanvasDraws(canvas)),
+      { timeout: 30_000 },
+    ).toBeGreaterThan(0);
 
-      ext.loseContext();
-      await new Promise(r => setTimeout(r, 200));
-      ext.restoreContext();
-      await new Promise(r => setTimeout(r, 200));
-      return { available: true };
+    const result = await page.evaluate(async () => {
+      const canvas = document.querySelector('div[data-testid="safe-avatar-container"] canvas') as HTMLCanvasElement | null;
+      if (!canvas) return { available: false, reason: 'no canvas' };
+      const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl')) as WebGLRenderingContext | null;
+      if (!gl) return { available: false, reason: 'no webgl context' };
+      const extension = gl.getExtension('WEBGL_lose_context');
+      if (!extension) return { available: false, reason: 'extension not supported' };
+      const before = window.__stabilityMetrics;
+      const lostBefore = before.contextsLost;
+      const restoredBefore = before.contextsRestored;
+      extension.loseContext();
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+      extension.restoreContext();
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 700));
+      return {
+        available: true,
+        lost: before.contextsLost - lostBefore,
+        restored: before.contextsRestored - restoredBefore,
+      };
     });
 
-    console.log(`[T14f WEBGL_lose_context] Résultat:`, loseContextResult);
-    expect(pageErrors).toHaveLength(0);
+    if (!result.available) {
+      test.info().annotations.push({ type: 'non mesuré', description: result.reason });
+      console.log(`[T20 WEBGL_lose_context] non mesuré : ${result.reason}`);
+    } else {
+      expect(result.lost).toBeGreaterThan(0);
+      expect(result.restored).toBeGreaterThan(0);
+      await expect(page.locator('div[data-testid="safe-avatar-container"] canvas')).toHaveCount(1);
+      await expect.poll(
+        () => avatarCanvas.evaluate((canvas) => window.__stabilityCanvasDraws(canvas)),
+        { timeout: 15_000 },
+      ).toBeGreaterThan(0);
+    }
+    await fixture.assertModels();
+  });
+
+  test('contrôles négatifs du harnais', () => {
+    expect(() => assertModelWhitelist(new Set(['a.fbx']), ['b.fbx'])).toThrow(/hors whitelist/);
+    expect(() => assertSingleDocument(['/', '/'])).toThrow(/rechargé/);
+    expect(() => assertFrames(0, 'contrôle')).toThrow(/aucune frame/);
+    expect(() => assertBoundedGrowth(0, 1_000, 10)).toThrow(/non bornée/);
+    expect(() => assertModelWhitelist(new Set(['a.fbx']), ['a.fbx'])).not.toThrow();
+    expect(() => assertSingleDocument(['/'])).not.toThrow();
+    expect(() => assertFrames(1, 'contrôle')).not.toThrow();
+    expect(() => assertBoundedGrowth(0, 10, 10)).not.toThrow();
   });
 });
 
@@ -161,7 +307,10 @@ declare global {
       contextsCreated: number;
       contextsLost: number;
       contextsRestored: number;
-      activeCanvases: number;
+      drawCalls: number;
     };
+    __stabilityCanvasDraws: (canvas: HTMLCanvasElement) => number;
+    __stabilitySetDocumentHidden: (hidden: boolean) => boolean;
+    __beercall_scene_metrics?: Record<string, { drawCalls?: number; timestamp?: number; frames?: number }>;
   }
 }
