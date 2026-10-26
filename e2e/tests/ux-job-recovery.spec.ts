@@ -11,6 +11,8 @@ declare global {
 
 test.use({ viewport: { width: 390, height: 844 }, trace: 'off' });
 
+const SUBMISSION_STAGES = /^(ANALYSE IA EN COURS|PRÉPARATION DE LA PHOTO|ENVOI DE LA PHOTO|PHOTO EN ATTENTE DE VÉRIFICATION|VÉRIFICATION DE LA PHOTO)(\.\.\.|…)$/;
+
 for (const activation of ['touch', 'keyboard'] as const) {
   test(`reprend le même job après suspension (${activation}), sans nouvelle soumission`, async ({ context, page }) => {
     const jobId = 'ux_job_recovery';
@@ -128,7 +130,7 @@ for (const activation of ['touch', 'keyboard'] as const) {
     await expect(resume).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(/son résultat reste inconnu/)).toBeVisible();
     await expect(locationInput).toHaveValue('Lieu fixture');
-    await expect(page.getByRole('button', { name: 'ANALYSE IA EN COURS...', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: SUBMISSION_STAGES })).toBeDisabled();
     expect(submitted).toHaveLength(1);
     expect(await page.evaluate(() => window.uxJobDeadlineDelays)).toEqual([20 * 60 * 1000]);
     recovered = true;

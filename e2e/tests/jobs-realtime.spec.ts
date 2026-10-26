@@ -5,6 +5,7 @@ test.setTimeout(180_000);
 const baseURL = 'http://127.0.0.1:8080';
 const password = 'BeerCallE2E123!';
 const unique = () => `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const SUBMISSION_STAGES = /^(ANALYSE IA EN COURS|PRÉPARATION DE LA PHOTO|ENVOI DE LA PHOTO|PHOTO EN ATTENTE DE VÉRIFICATION|VÉRIFICATION DE LA PHOTO)(\.\.\.|…)$/;
 
 interface Actor {
   context: BrowserContext;
@@ -123,7 +124,13 @@ async function createBeerCall(page: Page, squadId: number, location: string) {
   const accepted = page.waitForResponse(response => response.url().endsWith(`/api/squads/${squadId}/beer-calls/`) && response.request().method() === 'POST');
   const succeeded = page.waitForResponse(async response => response.url().includes(`/api/squads/${squadId}/beer-calls/jobs/`) && response.status() === 200 && (await response.json() as { status: string }).status === 'succeeded');
   await page.getByRole('button', { name: "LANCER L'APPEL", exact: true }).click();
-  await expect(page.getByRole('button', { name: 'ANALYSE IA EN COURS...' })).toBeDisabled();
+  const stageButton = page.getByRole('button', { name: SUBMISSION_STAGES });
+  const modalHeading = page.getByRole('heading', { name: "Valider l'Apéro" });
+  await expect.poll(async () => {
+    const isModalOpen = await modalHeading.isVisible().catch(() => false);
+    if (!isModalOpen) return true;
+    return await stageButton.isDisabled().catch(() => false);
+  }, { message: 'Bouton de soumission désactivé pendant le traitement ou modale déjà fermée' }).toBe(true);
   const response = await accepted;
   expect(response.status()).toBe(202);
   const job = await response.json() as { job_id: string; status: string };
@@ -153,8 +160,10 @@ test('job durable 202, progression, succès, rafraîchissement WebSocket et tick
     }), { id: setup.squad.id, ticket: setup.ticket });
     expect(replay).toBe('rejected');
   } finally {
-    await setup.creator.context.close();
-    await setup.member.context.close();
+    await setup.creator.page.close().catch(() => {});
+    await setup.creator.context.close().catch(() => {});
+    await setup.member.page.close().catch(() => {});
+    await setup.member.context.close().catch(() => {});
   }
 });
 
@@ -209,7 +218,9 @@ test('participation réelle puis démarrage et fin du mini-jeu déterministe', a
     expect((await nextResponse.json() as { game_id: string }).game_id).toBe('TURN_TRANSITION');
     await visibleState(setup.member.page.getByRole('heading', { name: 'Nouveau défi ! 🔥', exact: true }));
   } finally {
-    await setup.creator.context.close();
-    await setup.member.context.close();
+    await setup.creator.page.close().catch(() => {});
+    await setup.creator.context.close().catch(() => {});
+    await setup.member.page.close().catch(() => {});
+    await setup.member.context.close().catch(() => {});
   }
 });
