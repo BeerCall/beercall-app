@@ -5,7 +5,7 @@ test.setTimeout(180_000);
 const baseURL = 'http://127.0.0.1:8080';
 const password = 'BeerCallE2E123!';
 const unique = () => `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const SUBMISSION_STAGES = /^(ANALYSE IA EN COURS|PRÉPARATION DE LA PHOTO|ENVOI DE LA PHOTO|PHOTO EN ATTENTE DE VÉRIFICATION|VÉRIFICATION DE LA PHOTO)(\.\.\.|…)$/;
+const SUBMISSION_STAGES = /^(PRÉPARATION DE LA PHOTO|ENVOI DE LA PHOTO|PHOTO EN ATTENTE DE VÉRIFICATION|VÉRIFICATION DE LA PHOTO)(…|\.\.\.)$/;
 
 interface Actor {
   context: BrowserContext;
