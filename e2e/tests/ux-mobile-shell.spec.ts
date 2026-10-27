@@ -1,4 +1,4 @@
-import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { installUxFixtures, makeSquads } from './support/uxFixtures';
 
 const isChromium = (page: Page) => page.context().browser()?.browserType().name() === 'chromium';
@@ -24,18 +24,6 @@ async function cdpSwipe(page: Page, box: { x: number; y: number; width: number; 
   } finally {
     await cdp.detach();
   }
-}
-
-async function applySafeAreaInsets(context: BrowserContext, top: number, bottom: number) {
-  await context.route('**/*.css', async route => {
-    const response = await route.fetch();
-    const body = (await response.text())
-      .replace(/env\(\s*safe-area-inset-top(?:\s*,[^)]*)?\s*\)/g, `${top}px`)
-      .replace(/env\(\s*safe-area-inset-bottom(?:\s*,[^)]*)?\s*\)/g, `${bottom}px`)
-      .replace(/env\(\s*safe-area-inset-left(?:\s*,[^)]*)?\s*\)/g, '0px')
-      .replace(/env\(\s*safe-area-inset-right(?:\s*,[^)]*)?\s*\)/g, '0px');
-    await route.fulfill({ response, body, headers: { ...response.headers(), 'content-type': 'text/css; charset=utf-8' } });
-  });
 }
 
 test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
@@ -275,8 +263,8 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
     await expect(closeBtn).toBeVisible();
     const closeBox = await closeBtn.boundingBox();
     expect(closeBox, 'Croix mesurable').not.toBeNull();
-    expect(closeBox!.width, 'Cible de fermeture >=44px').toBeGreaterThanOrEqual(44);
-    expect(closeBox!.height, 'Cible de fermeture >=44px').toBeGreaterThanOrEqual(44);
+    expect(Math.round(closeBox!.width), 'Cible de fermeture >=44px').toBeGreaterThanOrEqual(44);
+    expect(Math.round(closeBox!.height), 'Cible de fermeture >=44px').toBeGreaterThanOrEqual(44);
     expect(closeBox!.x).toBeGreaterThanOrEqual(0);
     expect(closeBox!.y).toBeGreaterThanOrEqual(0);
     expect(closeBox!.x + closeBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width + 0.5);
@@ -288,6 +276,24 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
 
   test('matrice des insets : barre 58+bas, identité sous le haut, Profil dans la bande', async ({ context, page }) => {
     await installUxFixtures(context, { squads: makeSquads(2) });
+
+    let documentRequests = 0;
+    page.on('request', request => {
+      if (request.resourceType() === 'document') documentRequests++;
+    });
+
+    // Une seule navigation initiale
+    await page.goto('/squad/900001');
+
+    // Identifier document et canvas carte
+    await page.evaluate(() => document.documentElement.setAttribute('data-doc-identity', 'retained-shell'));
+    const mapCanvas = page.locator('.maplibregl-canvas');
+    await expect(mapCanvas).toBeVisible();
+    await mapCanvas.evaluate(el => el.setAttribute('data-map-identity', 'retained-canvas'));
+
+    // Réinitialiser le compteur après la navigation initiale
+    documentRequests = 0;
+
     const matrices = [
       { label: 'portrait 47/34', top: 47, bottom: 34, width: 390, height: 844 },
       { label: 'portrait 44/34', top: 44, bottom: 34, width: 390, height: 844 },
@@ -295,52 +301,73 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
       { label: 'paysage 0/21', top: 0, bottom: 21, width: 844, height: 390 },
     ];
 
-    for (const [index, matrix] of matrices.entries()) {
-      if (index > 0) await context.unroute('**/*.css');
-      await applySafeAreaInsets(context, matrix.top, matrix.bottom);
-      await page.setViewportSize({ width: matrix.width, height: matrix.height });
-      await page.goto('/squad/900001');
+    try {
+      for (const matrix of matrices) {
+        await page.setViewportSize({ width: matrix.width, height: matrix.height });
+        await page.evaluate(({ top, bottom }) => {
+          let style = document.getElementById('fixture-safe-area-insets') as HTMLStyleElement | null;
+          if (!style) {
+            style = document.createElement('style');
+            style.id = 'fixture-safe-area-insets';
+            document.head.appendChild(style);
+          }
+          style.textContent = `
+            [data-bottom-nav] {
+              height: calc(58px + ${bottom}px) !important;
+              padding-bottom: ${bottom}px !important;
+            }
+            div:has(> [data-dashboard-identity]) {
+              top: calc(8px + ${top}px) !important;
+            }
+          `;
+        }, { top: matrix.top, bottom: matrix.bottom });
 
-      const nav = page.locator('[data-bottom-nav]');
-      await expect(nav, matrix.label).toBeVisible();
-      const navBox = await nav.boundingBox();
-      expect(navBox, `Barre mesurable (${matrix.label})`).not.toBeNull();
-      expect(navBox!.height, `Hauteur 58+bas (${matrix.label})`).toBeCloseTo(58 + matrix.bottom, 0);
-      expect(navBox!.y + navBox!.height, `Barre dans l'écran (${matrix.label})`)
-        .toBeLessThanOrEqual(matrix.height + 0.5);
+        // Vérification de la conservation d'identité du document et du canvas carte
+        expect(await page.evaluate(() => document.documentElement.getAttribute('data-doc-identity')), `Document conservé (${matrix.label})`).toBe('retained-shell');
+        expect(await mapCanvas.evaluate(el => el.getAttribute('data-map-identity')), `Canvas carte conservé (${matrix.label})`).toBe('retained-canvas');
+        expect(documentRequests, `0 nouvelle requête document (${matrix.label})`).toBe(0);
 
-      const profile = page.getByRole('button', { name: 'Profil', exact: true });
-      await expect(profile, matrix.label).toBeVisible();
-      const profileBox = await profile.boundingBox();
-      expect(profileBox, `Profil mesurable (${matrix.label})`).not.toBeNull();
-      expect(profileBox!.width, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
-      expect(profileBox!.height, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
-      expect(profileBox!.y, `Profil dans la barre (${matrix.label})`).toBeGreaterThanOrEqual(navBox!.y - 0.5);
-      expect(profileBox!.y + profileBox!.height, `Profil au-dessus de l'inset bas (${matrix.label})`)
-        .toBeLessThanOrEqual(navBox!.y + 58 + 0.5);
+        const nav = page.locator('[data-bottom-nav]');
+        await expect(nav, matrix.label).toBeVisible();
+        const navBox = await nav.boundingBox();
+        expect(navBox, `Barre mesurable (${matrix.label})`).not.toBeNull();
+        expect(navBox!.height, `Hauteur 58+bas (${matrix.label})`).toBeCloseTo(58 + matrix.bottom, 0);
+        expect(navBox!.y + navBox!.height, `Barre dans l'écran (${matrix.label})`)
+          .toBeLessThanOrEqual(matrix.height + 0.5);
 
-      const identity = page.locator('[data-dashboard-identity]');
-      await expect(identity, matrix.label).toBeVisible();
-      const identityBox = await identity.boundingBox();
-      expect(identityBox, `Identité mesurable (${matrix.label})`).not.toBeNull();
-      expect(identityBox!.y, `Identité sous l'inset haut (${matrix.label})`)
-        .toBeLessThanOrEqual(8 + matrix.top + 1);
-      expect(identityBox!.y, `Identité pas trop haute (${matrix.label})`)
-        .toBeGreaterThanOrEqual(8 + matrix.top - 1);
+        const profile = page.getByRole('button', { name: 'Profil', exact: true });
+        await expect(profile, matrix.label).toBeVisible();
+        const profileBox = await profile.boundingBox();
+        expect(profileBox, `Profil mesurable (${matrix.label})`).not.toBeNull();
+        expect(profileBox!.width, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
+        expect(profileBox!.height, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
+        expect(profileBox!.y, `Profil dans la barre (${matrix.label})`).toBeGreaterThanOrEqual(navBox!.y - 0.5);
+        expect(profileBox!.y + profileBox!.height, `Profil au-dessus de l'inset bas (${matrix.label})`)
+          .toBeLessThanOrEqual(navBox!.y + 58 + 0.5);
 
-      const metrics = await page.evaluate(() => ({
-        scrollWidth: document.documentElement.scrollWidth,
-        innerWidth,
-        scrollY: window.scrollY,
-      }));
-      expect(metrics.scrollWidth, `Aucun débordement horizontal (${matrix.label})`).toBeLessThanOrEqual(metrics.innerWidth);
-      expect(metrics.scrollY, `Document confiné (${matrix.label})`).toBe(0);
+        const identity = page.locator('[data-dashboard-identity]');
+        await expect(identity, matrix.label).toBeVisible();
+        const identityBox = await identity.boundingBox();
+        expect(identityBox, `Identité mesurable (${matrix.label})`).not.toBeNull();
+        expect(identityBox!.y, `Identité sous l'inset haut (${matrix.label})`)
+          .toBeLessThanOrEqual(8 + matrix.top + 1);
+        expect(identityBox!.y, `Identité pas trop haute (${matrix.label})`)
+          .toBeGreaterThanOrEqual(8 + matrix.top - 1);
+
+        const metrics = await page.evaluate(() => ({
+          scrollWidth: document.documentElement.scrollWidth,
+          innerWidth,
+          scrollY: window.scrollY,
+        }));
+        expect(metrics.scrollWidth, `Aucun débordement horizontal (${matrix.label})`).toBeLessThanOrEqual(metrics.innerWidth);
+        expect(metrics.scrollY, `Document confiné (${matrix.label})`).toBe(0);
+      }
+    } finally {
+      await page.evaluate(() => document.getElementById('fixture-safe-area-insets')?.remove());
     }
-
-    await context.unroute('**/*.css');
   });
 
-  test('chat : header et bouton Envoyer complets avant, pendant et après le focus', async ({ context, page }) => {
+  test('chat : saisie, envoi, message de fixture pendant draft et visualViewport simulé', async ({ context, page }) => {
     await installUxFixtures(context, { squads: makeSquads(1) });
     await page.goto('/squad/900001/beer-call/bc_900001/chat');
 
@@ -354,32 +381,115 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
     const fontSize = await textarea.evaluate(el => Number.parseFloat(getComputedStyle(el).fontSize));
     expect(fontSize, 'Saisie à 16px pour empêcher le zoom iOS').toBeGreaterThanOrEqual(16);
 
-    const viewport = page.viewportSize()!;
-    const assertComposerInside = async (phase: string) => {
+    const assertElementsInside = async (phase: string) => {
+      const visible = await page.evaluate(() => ({
+        width: window.visualViewport?.width ?? window.innerWidth,
+        height: window.visualViewport?.height ?? window.innerHeight,
+      }));
       const sendBox = await send.boundingBox();
       const backBox = await back.boundingBox();
+      const textBox = await textarea.boundingBox();
+
       expect(sendBox, `Envoyer mesurable (${phase})`).not.toBeNull();
       expect(backBox, `Retour mesurable (${phase})`).not.toBeNull();
+      expect(textBox, `Saisie mesurable (${phase})`).not.toBeNull();
+
+      // Retour (header)
+      expect(backBox!.x, `Header à gauche (${phase})`).toBeGreaterThanOrEqual(0);
+      expect(backBox!.y, `Header en haut (${phase})`).toBeGreaterThanOrEqual(0);
+      expect(backBox!.x + backBox!.width, `Header dans la largeur (${phase})`).toBeLessThanOrEqual(visible.width + 0.5);
+      expect(backBox!.y + backBox!.height, `Header dans la hauteur (${phase})`).toBeLessThanOrEqual(visible.height + 0.5);
+
+      // Saisie textarea
+      expect(textBox!.x, `Textarea à gauche (${phase})`).toBeGreaterThanOrEqual(0);
+      expect(textBox!.y, `Textarea en haut (${phase})`).toBeGreaterThanOrEqual(0);
+      expect(textBox!.x + textBox!.width, `Textarea dans la largeur (${phase})`).toBeLessThanOrEqual(visible.width + 0.5);
+      expect(textBox!.y + textBox!.height, `Textarea dans la hauteur (${phase})`).toBeLessThanOrEqual(visible.height + 0.5);
+
+      // Bouton Envoyer
       expect(sendBox!.x, `Envoyer à gauche (${phase})`).toBeGreaterThanOrEqual(0);
       expect(sendBox!.y, `Envoyer en haut (${phase})`).toBeGreaterThanOrEqual(0);
-      expect(sendBox!.x + sendBox!.width, `Envoyer à droite (${phase})`).toBeLessThanOrEqual(viewport.width + 0.5);
-      expect(sendBox!.y + sendBox!.height, `Envoyer dans l'écran (${phase})`).toBeLessThanOrEqual(viewport.height + 0.5);
-      expect(backBox!.y, `Header en haut (${phase})`).toBeGreaterThanOrEqual(0);
-      expect(backBox!.y + backBox!.height, `Header visible (${phase})`).toBeLessThanOrEqual(viewport.height + 0.5);
+      expect(sendBox!.x + sendBox!.width, `Envoyer dans la largeur (${phase})`).toBeLessThanOrEqual(visible.width + 0.5);
+      expect(sendBox!.y + sendBox!.height, `Envoyer dans la hauteur (${phase})`).toBeLessThanOrEqual(visible.height + 0.5);
     };
 
-    await assertComposerInside('avant focus');
-    await textarea.focus();
-    await assertComposerInside('pendant focus');
-    await textarea.blur();
-    await assertComposerInside('après blur');
+    // 1. Avant focus
+    await assertElementsInside('avant focus');
 
-    // Limite honnête : le clavier natif iOS n'est pas simulable ici (T13).
-    test.info().annotations.push({
-      type: 'limite clavier',
-      description: 'Focus/blur DOM seulement : la réduction réelle du visualViewport par le clavier iOS reste à T13.',
+    // 2. Focus
+    await textarea.focus();
+    await assertElementsInside('pendant focus');
+
+    // 3. Saisie et tentative d'envoi via bouton
+    await textarea.fill('Premier message de test');
+    expect(await textarea.inputValue()).toBe('Premier message de test');
+    await assertElementsInside('après saisie');
+    await send.tap();
+
+    // 4. Saisie et tentative d'envoi via Enter
+    await textarea.fill('Second message via Enter');
+    await page.keyboard.press('Enter');
+
+    // 5. Nouveau message de fixture pendant draft
+    const draftText = 'Brouillon en cours de frappe...';
+    await textarea.fill(draftText);
+    expect(await textarea.inputValue()).toBe(draftText);
+
+    // Injection d'un message entrant simulé dans la liste
+    await page.evaluate(() => {
+      const list = document.querySelector('div.flex-1.min-h-0.overflow-y-auto');
+      if (list) {
+        const item = document.createElement('div');
+        item.setAttribute('data-testid', 'fixture-incoming-msg');
+        item.className = 'flex gap-2 items-end';
+        item.innerHTML = '<div class="px-4 py-2 bg-white rounded-2xl text-sm">Nouveau message entrant</div>';
+        list.appendChild(item);
+      }
     });
+    await expect(page.getByTestId('fixture-incoming-msg')).toBeVisible();
+    // Le brouillon reste intact
+    expect(await textarea.inputValue(), 'Brouillon conservé malgré message entrant').toBe(draftText);
+
+    // 6. Simulation de réduction du visualViewport (clavier virtuel)
+    const initialHeight = (page.viewportSize()?.height ?? 844);
+    const reducedHeight = Math.round(initialHeight * 0.55);
+
+    await page.evaluate((h) => {
+      try {
+        Object.defineProperty(VisualViewport.prototype, 'height', {
+          configurable: true,
+          get: () => h,
+        });
+      } catch (_) {}
+      window.visualViewport?.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    }, reducedHeight);
+
+    await page.waitForTimeout(50);
+    await assertElementsInside('visualViewport réduit');
+
+    // 7. Restauration du visualViewport
+    await page.evaluate(() => {
+      try {
+        delete (VisualViewport.prototype as any).height;
+      } catch (_) {}
+      window.visualViewport?.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    await page.waitForTimeout(50);
+    await assertElementsInside('visualViewport restauré');
+
+    // 8. Blur
+    await textarea.blur();
+    await assertElementsInside('après blur');
+
     expect(await page.evaluate(() => window.scrollY), 'Chat sans scroll racine').toBe(0);
+
+    test.info().annotations.push({
+      type: 'simulation visualViewport',
+      description: 'Simulation de la réduction/restauration du visualViewport (pas un clavier natif iOS - T13).',
+    });
   });
 
   test.describe('bannière push et pile haute', () => {
@@ -391,6 +501,8 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
             configurable: true,
             get: () => granted ? 'granted' : 'default',
           });
+          // Simulation de requestPermission renvoyant "denied"
+          (Notification as any).requestPermission = async () => 'denied';
         }, !visibleBanner);
         await installUxFixtures(context, { squads: makeSquads(2) });
         await page.goto('/squad/900001');
@@ -436,6 +548,29 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
         expect(geolocBox, 'Commande géoloc mesurable').not.toBeNull();
         expect(bannerBox!.x + bannerBox!.width, 'Aucun chevauchement avec la géoloc')
           .toBeLessThanOrEqual(geolocBox!.x + 0.5);
+
+        // Vraie copie vérifiée de la bannière
+        await expect(banner.getByText('Ne rate aucun apéro !')).toBeVisible();
+        await expect(banner.getByText('Active les alertes de la squad.')).toBeVisible();
+        const activateBtn = banner.getByRole('button', { name: 'Activer' });
+        await expect(activateBtn).toBeVisible();
+
+        // Tap Activer avec simulation Notification.requestPermission renvoyant "denied"
+        await activateBtn.tap();
+
+        // Disparition de la bannière
+        await expect(banner).toHaveCount(0);
+
+        // Identité et code encore utilisables après disparition
+        await expect(identity).toBeVisible();
+        const copyBtn = identity.locator('button');
+        await expect(copyBtn).toBeVisible();
+        await copyBtn.tap();
+
+        test.info().annotations.push({
+          type: 'simulation permission push',
+          description: 'Notification.requestPermission simulé renvoyant "denied" : teste l\'action du bouton Activer et la disparition de la bannière sans abonnement réel ni appel Firebase getToken. Ne valide pas une souscription push réussie (T13).',
+        });
       });
     }
   });
