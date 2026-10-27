@@ -1,9 +1,12 @@
-import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, realpathSync, readdirSync, statSync } from 'node:fs';
+import { test, expect, type Browser, type BrowserContext, type Page, type Request, type Response } from '@playwright/test';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, realpathSync, readdirSync, statSync, existsSync, linkSync, unlinkSync, mkdtempSync, rmdirSync } from 'node:fs';
 import { resolve, relative, isAbsolute, join } from 'node:path';
 import { homedir, cpus, totalmem } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
 
 test.setTimeout(180_000);
 
@@ -46,7 +49,7 @@ interface Operator {
   metadata: JsonObject & { corpus: Record<Kind, CorpusEntry> };
   selection: { category: Category; repetition: number; kind: Kind };
   run: { epoch: string; attempt: number; startupMs: number; firstJobOfProcess: boolean;
-    process: { hostPid: number; startedAt: string }; weightsInitiallyPresent: boolean };
+    process: { hostPid: number; startedAt: string }; weightsInitiallyPresent: boolean; warmupJobId?: string };
 }
 
 function guard(condition: unknown, label: string): asserts condition {
@@ -106,6 +109,7 @@ function loadOperator(path: string | undefined, env: NodeJS.ProcessEnv): Operato
   guard(nonempty(run.epoch) && Number.isSafeInteger(run.attempt) && Number(run.attempt) > 0 && finite(run.startupMs), 'epoch/attempt/startup');
   guard(Number.isSafeInteger(worker.hostPid) && Number(worker.hostPid) > 0 && utc(worker.startedAt), 'hostPID/StartedAt');
   guard(run.firstJobOfProcess === (selection.category !== 'warm') && typeof run.weightsInitiallyPresent === 'boolean', 'premier job et état initial des poids');
+  guard(selection.category !== 'warm' || isJobId(run.warmupJobId), 'job de chauffe séparé requis pour warm');
   return raw as unknown as Operator;
 }
 function validateStack(containers: Container[]): Record<'api' | 'worker' | 'frontend' | 'proxy', Container> {
@@ -252,7 +256,7 @@ async function qualify(browser: Browser, origin: string) {
   guard(frontendHash === localFingerprint(join(frontendRoot, 'dist'), listFiles(join(frontendRoot, 'dist'))), 'assets servis différents du build F local');
   const engine = record(parseJson(command('docker', ['info', '--format', '{"cpus":{{.NCPU}},"memoryBytes":{{.MemTotal}}}']), 'limites Docker'), 'limites Docker');
   const pkgVersion = (path: string): unknown => record(parseJson(readFileSync(path, 'utf8'), 'version package'), 'package').version;
-  const actual: JsonObject = {
+  const actual: JsonObject & { corpus: Record<Kind, CorpusEntry> } = {
     sources: { F: { head: heads.F, servedSha256: frontendHash }, B: { head: heads.B, servedSha256: backendHash }, O: { head: heads.O, servedSha256: localFingerprint(repoRoot, trackedFiles(repoRoot, ['e2e'])) } },
     images: { frontend: stack.frontend.image, api: stack.api.image, worker: stack.worker.image },
     versions: { node: process.versions.node, python: worker.python, playwright: pkgVersion(require.resolve('@playwright/test/package.json')), three: pkgVersion(join(frontendRoot, 'node_modules/three/package.json')), pytorch: worker.pytorch, ultralytics: worker.ultralytics },
@@ -276,17 +280,167 @@ interface Actor {
   token: string;
 }
 
-interface LatencyMeasurement {
-  attempt: number;
-  kind: 'drink' | 'no_drink';
-  photoHash: string;
-  jobId: string;
-  verdict: string;
-  clickToPostMs: number;
-  postToAcceptedMs: number;
-  acceptedToResultMs: number;
-  totalDurationMs: number;
-  timestampUtc: string;
+type Verdict = 'succeeded' | 'rejected' | 'failed';
+interface JobResult { id: string; status: Verdict }
+interface DriverMarks { click?: number; request?: number; accepted?: number; terminal?: number; ui?: number }
+interface TimingEvent {
+  phase: string; job_id: string; pid: number; attempt: number; utc: string;
+  duration_ms?: number; status?: string; outcome?: string;
+}
+const terminalStatuses = ['succeeded', 'rejected', 'failed'];
+const phases = ['enqueued', 'claimed', 'file_read', 'detector_total', 'finalization', 'result'] as const;
+function isJobId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+}
+function correlateTimeline(marks: DriverMarks, acceptedId: string, terminal: JobResult, ui: JobResult) {
+  const values = [marks.click, marks.request, marks.accepted, marks.terminal, marks.ui];
+  guard(values.every(finite), 'horloge pilote incomplète/non finie');
+  const [click, request, accepted, result, visible] = values as number[];
+  guard(request >= click && accepted >= request && result >= accepted && visible >= result, 'ordre clic/request/202/résultat/UI');
+  guard(isJobId(acceptedId) && terminal.id === acceptedId && ui.id === acceptedId && ui.status === terminal.status && terminalStatuses.includes(terminal.status), 'corrélation job_id/verdict UI');
+  return { clickToPostMs: request - click, postToAcceptedMs: accepted - request, acceptedToResultMs: visible - accepted, totalDurationMs: visible - click };
+}
+function partialDurations(marks: DriverMarks) {
+  const duration = (start: number | undefined, end: number | undefined) => finite(start) && finite(end) && end >= start ? end - start : 'inconnue';
+  return { clickToPostMs: duration(marks.click, marks.request), postToAcceptedMs: duration(marks.request, marks.accepted), acceptedToResultMs: duration(marks.accepted, marks.ui), totalDurationMs: duration(marks.click, marks.ui) };
+}
+
+function observeJob(page: Page, squadId: number) {
+  const endpoint = `${baseURL}/api/squads/${squadId}/beer-calls/`;
+  const marks: DriverMarks = {};
+  const faults: string[] = [];
+  let submitted: Request | undefined;
+  let posts = 0;
+  let accepted: string | undefined;
+  const results = new Map<string, { body: JobResult; at: number }>();
+  const pending = new Set<Promise<void>>();
+  const onRequest = (request: Request) => {
+    if (request.url() !== endpoint || request.method() !== 'POST') return;
+    posts++;
+    if (posts !== 1) { faults.push('POST dupliqué'); return; }
+    submitted = request;
+    marks.request = performance.now();
+  };
+  const onResponse = (response: Response) => {
+    const at = performance.now();
+    const isAccepted = submitted !== undefined && response.request() === submitted;
+    const path = new URL(response.url());
+    const getId = path.origin === baseURL && path.pathname.startsWith(`/api/squads/${squadId}/beer-calls/jobs/`)
+      ? path.pathname.split('/').filter(Boolean).at(-1) : undefined;
+    if (!isAccepted && !(getId && response.request().method() === 'GET' && response.status() === 200)) return;
+    if (isAccepted) {
+      if (response.status() !== 202) { faults.push('POST non accepté202'); return; }
+      // L'instant202 est celui de l'événement response, PAS de la fin de json().
+      marks.accepted = at;
+    }
+    const task = (async () => {
+      const body = record(await response.json() as unknown, 'réponse job');
+      if (isAccepted) {
+        guard(isJobId(body.job_id), 'job_id202 absent');
+        accepted = body.job_id;
+      } else if (terminalStatuses.includes(String(body.status))) {
+        guard(isJobId(getId) && body.id === getId, 'GET job_id incohérent');
+        // Ne jamais remplacer la première observation terminale par un GET tardif.
+        if (!results.has(getId)) results.set(getId, { body: { id: getId, status: body.status as Verdict }, at });
+      }
+    })().catch(() => { faults.push('réponse job illisible/incohérente'); }).finally(() => pending.delete(task));
+    pending.add(task);
+  };
+  page.on('request', onRequest);
+  page.on('response', onResponse);
+  return {
+    marks, faults,
+    get posts() { return posts; },
+    get acceptedId() { return accepted; },
+    get terminal() { return accepted ? results.get(accepted) : undefined; },
+    detach() {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+    },
+    async drain() { await Promise.allSettled([...pending]); },
+  };
+}
+
+function parseTimings(log: string): TimingEvent[] {
+  const events: TimingEvent[] = [];
+  for (const line of log.split('\n')) {
+    const start = line.indexOf('{');
+    if (start < 0) continue;
+    let value: JsonObject;
+    try { value = record(JSON.parse(line.slice(start)) as unknown, 'log'); } catch { continue; }
+    if (value.event !== 'beer_job_timing' || !isJobId(value.job_id)) continue;
+    guard(typeof value.utc === 'string' && Number.isFinite(Date.parse(value.utc)), 'UTC du log');
+    guard(Number.isSafeInteger(value.pid) && Number(value.pid) > 0 && Number.isSafeInteger(value.attempt) && Number(value.attempt) >= 0, 'pid/attempt du log');
+    guard(value.duration_ms === undefined || finite(value.duration_ms), 'durée locale du log');
+    events.push({ phase: String(value.phase), job_id: value.job_id, pid: Number(value.pid), attempt: Number(value.attempt), utc: new Date(value.utc).toISOString(),
+      ...(value.duration_ms === undefined ? {} : { duration_ms: Number(value.duration_ms) }),
+      ...(typeof value.status === 'string' ? { status: value.status } : {}), ...(typeof value.outcome === 'string' ? { outcome: value.outcome } : {}),
+    });
+  }
+  return events;
+}
+function readTimings(container: Container): TimingEvent[] {
+  // docker logs restitue les logs Python sur stderr. Les deux flux restent en
+  // mémoire, filtrés avant export ; aucun stdout/stderr brut n'est imprimé.
+  const result = spawnSync('docker', ['logs', '--since', container.startedAt, container.id], { encoding: 'utf8', timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+  guard(result.status === 0 && !result.error, 'logs Docker inaccessibles');
+  return parseTimings(`${result.stdout}\n${result.stderr}`).filter(e => Date.parse(e.utc) >= Date.parse(container.startedAt));
+}
+function validateHistory(events: TimingEvent[], operator: Operator): void {
+  if (operator.selection.category !== 'warm') {
+    guard(events.every(e => e.phase !== 'claimed'), 'cet essai ne serait pas le premier job du processus');
+  } else {
+    const warmup = events.filter(e => e.job_id === operator.run.warmupJobId);
+    guard(warmup.some(e => e.phase === 'result' && ['succeeded', 'rejected'].includes(e.outcome ?? '')) &&
+      warmup.some(e => e.phase === 'detector_total' && finite(e.duration_ms) && ['success', 'rejected'].includes(e.status ?? '')), 'chauffe terminale réellement inférée non observable');
+  }
+}
+function correlateLogs(api: TimingEvent[], worker: TimingEvent[], jobId: string, verdict: Verdict) {
+  const events = [...api, ...worker].filter(e => e.job_id === jobId);
+  const byPhase = Object.fromEntries(phases.map(phase => {
+    const rows = events.filter(e => e.phase === phase);
+    return [phase, rows.length ? rows : 'inconnue'];
+  }));
+  const missing = phases.filter(phase => !events.some(e => e.phase === phase));
+  const enqueued = api.find(e => e.job_id === jobId && e.phase === 'enqueued');
+  const claimed = worker.find(e => e.job_id === jobId && e.phase === 'claimed');
+  const queueMs = enqueued && claimed ? Date.parse(claimed.utc) - Date.parse(enqueued.utc) : undefined;
+  const terminal = worker.filter(e => e.job_id === jobId && e.phase === 'result' && e.outcome === verdict).at(-1);
+  const attempts = [...new Set(worker.filter(e => e.job_id === jobId).map(e => e.attempt))];
+  const pids = [...new Set(worker.filter(e => e.job_id === jobId).map(e => e.pid))];
+  const finalAttempt = terminal ? worker.filter(e => e.job_id === jobId && e.attempt === terminal.attempt && e.pid === terminal.pid) : [];
+  const finalAttemptComplete = ['claimed', 'file_read', 'detector_total', 'finalization', 'result'].every(phase => finalAttempt.some(e => e.phase === phase)) &&
+    ['file_read', 'detector_total', 'finalization'].every(phase => finalAttempt.some(e => e.phase === phase && finite(e.duration_ms)));
+  const complete = missing.length === 0 && finite(queueMs) && terminal !== undefined && pids.length === 1 && finalAttemptComplete && enqueued?.attempt === 0;
+  return { phases: byPhase, missing, finalAttemptComplete, queueUtcMs: finite(queueMs) ? queueMs : 'inconnue', queueClock: 'UTC corrélées API/worker, pas une durée monotone inter-processus', pids, attempts, complete };
+}
+function atomicWriteOnce(path: string, value: unknown): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 });
+    // Publication atomique exclusive sur le même filesystem ; jamais rename
+    // remplaçant un ancien run A (Windows comme POSIX).
+    linkSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+interface SceneSignal { view?: string; instanceId?: string; generation?: number; timestamp?: number; drawCalls?: number }
+function currentScene(signals: Record<string, SceneSignal>): boolean {
+  const map = signals.mapInteractive;
+  const avatar = signals.avatarFrameSubmitted;
+  const usable = signals.sceneUsable;
+  return Boolean(map && avatar && usable && [map, avatar, usable].every(s => s.view === 'dashboard' && nonempty(s.instanceId) && finite(s.timestamp) && s.timestamp > 0 && Number.isSafeInteger(s.generation) && Number(s.generation) > 0) &&
+    map.generation === avatar.generation && usable.generation === map.generation && finite(avatar.drawCalls) && avatar.drawCalls > 0 && usable.timestamp === Math.max(Number(map.timestamp), Number(avatar.timestamp)));
+}
+async function waitForCurrentScene(page: Page): Promise<void> {
+  await expect(page.locator('div.maplibregl-map canvas.maplibregl-canvas')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Créer un Beer Call', exact: true }).locator('canvas')).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => {
+    const signals = await page.evaluate(() => (window as unknown as { __beercall_scene_metrics?: Record<string, SceneSignal> }).__beercall_scene_metrics ?? {});
+    return currentScene(signals);
+  }, { timeout: 30_000, message: 'Carte interactive et frame du joueur de la génération courante' }).toBe(true);
 }
 
 async function registerActor(browser: Browser): Promise<Actor> {
@@ -296,66 +450,76 @@ async function registerActor(browser: Browser): Promise<Actor> {
     geolocation: { latitude: 48.8566, longitude: 2.3522 },
     permissions: ['geolocation'],
   });
+  try {
+    // Les requêtes applicatives et leurs redirections ne peuvent pas sortir du
+    // proxy qualifié. Seuls les GET publics de tuiles/styles Carto sont externes.
+    await context.route('**/*', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const local = url.origin === baseURL;
+      const carto = url.protocol === 'https:' && (url.hostname === 'basemaps.cartocdn.com' || url.hostname.endsWith('.basemaps.cartocdn.com'));
+      const publicMap = carto && request.method() === 'GET' && !request.isNavigationRequest() && !request.headers().authorization;
+      if ((!local && !publicMap) || ((request.isNavigationRequest() || url.pathname.startsWith('/api/')) && request.redirectedFrom())) {
+        await route.abort('blockedbyclient');
+        return;
+      }
+      await route.continue();
+    });
 
-  // Les requêtes applicatives et leurs redirections ne peuvent pas sortir du
-  // proxy qualifié. Seuls les GET publics de tuiles/styles Carto sont externes.
-  await context.route('**/*', async route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const local = url.origin === baseURL;
-    const carto = url.protocol === 'https:' && (url.hostname === 'basemaps.cartocdn.com' || url.hostname.endsWith('.basemaps.cartocdn.com'));
-    const publicMap = carto && request.method() === 'GET' && !request.isNavigationRequest() && !request.headers().authorization;
-    if ((!local && !publicMap) || ((request.isNavigationRequest() || url.pathname.startsWith('/api/')) && request.redirectedFrom())) {
-      await route.abort('blockedbyclient');
-      return;
+    const catalogue = await context.request.get('/api/auth/profile/', { maxRedirects: 0 });
+    expect(catalogue.status()).toBe(200);
+    const items = (await catalogue.json() as { shop_items: { id: string; category: string; gender: string }[] }).shop_items;
+    const avatar: Record<string, string> = { gender: 'Men' };
+    for (const category of ['head', 'body', 'legs', 'feet', 'accessory', 'animation']) {
+      avatar[category] = items.find(item => item.category === category && ['Men', 'Unisex'].includes(item.gender) && item.id.endsWith('_0'))?.id ?? 'none';
     }
-    await route.continue();
-  });
+    avatar.accessory = 'none';
+    avatar.animation = 'Idle';
+    guard(['head', 'body', 'legs', 'feet'].every(part => nonempty(avatar[part]) && avatar[part] !== 'none'), 'avatar joueur obligatoire non-none');
 
-  const catalogue = await context.request.get('/api/auth/profile/', { maxRedirects: 0 });
-  expect(catalogue.status()).toBe(200);
-  const items = (await catalogue.json() as { shop_items: { id: string; category: string; gender: string }[] }).shop_items;
-  const avatar: Record<string, string> = { gender: 'Men' };
-  for (const category of ['head', 'body', 'legs', 'feet', 'accessory', 'animation']) {
-    avatar[category] = items.find(item => item.category === category && ['Men', 'Unisex'].includes(item.gender) && item.id.endsWith('_0'))?.id ?? 'none';
+    const username = unique();
+    const registered = await context.request.post('/api/auth/signup/', { data: { username, password, avatar }, maxRedirects: 0 });
+    expect(registered.status()).toBe(200);
+    const token = (await registered.json() as { access_token: string }).access_token;
+
+    const page = await context.newPage();
+    await page.goto('/login');
+    await page.getByPlaceholder('Ton Pseudo', { exact: true }).fill(username);
+    await page.getByPlaceholder('Mot de passe', { exact: true }).fill(password);
+    await page.getByRole('button', { name: 'SE CONNECTER', exact: true }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    return { context, page, username, token };
+  } catch {
+    await context.close();
+    throw new Error('Préparation acteur latence interrompue ; aucune mesure valide.');
   }
-  avatar.accessory = 'none';
-  avatar.animation = 'Idle';
-
-  const username = unique();
-  const registered = await context.request.post('/api/auth/signup/', { data: { username, password, avatar }, maxRedirects: 0 });
-  expect(registered.status()).toBe(200);
-  const token = (await registered.json() as { access_token: string }).access_token;
-
-  const page = await context.newPage();
-  await page.goto('/login');
-  await page.getByPlaceholder('Ton Pseudo', { exact: true }).fill(username);
-  await page.getByPlaceholder('Mot de passe', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'SE CONNECTER', exact: true }).click();
-  await expect(page).toHaveURL(/\/dashboard$/);
-
-  // Attendre la carte utilisable avant toute mesure
-  const mapContainer = page.locator('div.maplibregl-map, div[aria-label="Carte des apéros"]');
-  await expect(mapContainer.first()).toBeVisible({ timeout: 10_000 });
-
-  return { context, page, username, token };
 }
 
 test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
   test('mesure chronométrée de bout en bout clic -> 202 -> résultat', async ({ browser, baseURL: configuredOrigin }) => {
     // Tous les gardes passent avant registerActor, donc avant la première écriture API.
     const qualified = await qualify(browser, configuredOrigin ?? '');
-    const resultsDir = qualified.resultsDir;
-
-    const runs: LatencyMeasurement[] = [];
-    const kinds: Array<'drink' | 'no_drink'> = ['drink', 'no_drink'];
-
-    for (let i = 0; i < kinds.length; i++) {
-      const kind = kinds[i];
-      const photo = qualified.photos[kind];
-      const actor = await registerActor(browser);
-
-      try {
+    const { operator, resultsDir } = qualified;
+    const history = readTimings(qualified.stack.worker);
+    validateHistory(history, operator);
+    const { category, repetition, kind } = operator.selection;
+    const photo = qualified.photos[kind];
+    const output = join(resultsDir, `latency-${operator.variant}-${category}-${repetition}-attempt${operator.run.attempt}.json`);
+    guard(!existsSync(output), 'run immuable déjà présent');
+    const reservation = `${output}.lock`;
+    writeFileSync(reservation, '', { flag: 'wx', mode: 0o600 });
+    let actor: Actor | undefined;
+    let observer: ReturnType<typeof observeJob> | undefined;
+    let terminal: JobResult | undefined;
+    let ui: JobResult | undefined;
+    let durations: ReturnType<typeof correlateTimeline> | undefined;
+    let correlation: ReturnType<typeof correlateLogs> | undefined;
+    let technicalFailure = false;
+    let failureStage = 'préparation';
+    let timestampUtc = new Date().toISOString();
+    try {
+      actor = await registerActor(browser);
         // Créer une squad neuve pour cet essai
         const squadName = `Squad Latency ${unique()}`;
         const createdSquad = await actor.context.request.post('/api/squads/', {
@@ -370,8 +534,9 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
         await actor.page.goto(`/squad/${squad.id}`);
         const squadHeading = actor.page.getByRole('heading', { name: squadName, exact: true });
         await expect(squadHeading).toBeVisible({ timeout: 15_000 });
-        // Clic sur l'en-tête pour déclencher la première interaction utilisateur qui démarre le GPS (watchPosition)
+        // GPS réel du navigateur local ; aucune mutation du store applicatif.
         await squadHeading.click();
+        await waitForCurrentScene(actor.page);
 
         // Attendre que le marqueur joueur « Créer un Beer Call » soit actif (position GPS fixée)
         const createButton = actor.page.getByRole('button', { name: 'Créer un Beer Call', exact: true });
@@ -390,69 +555,185 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
         const locationName = `Bar ${unique()}`;
         await actor.page.getByPlaceholder('Ex: Bar Le Central...').fill(locationName);
 
-        // Promesses de chronométrage
-        let tPostSent = 0;
-        let tPostReceived = 0;
-        let tCompleted = 0;
-
-        const acceptedPromise = actor.page.waitForResponse(response => {
-          if (response.url().endsWith(`/api/squads/${squad.id}/beer-calls/`) && response.request().method() === 'POST') {
-            tPostSent = performance.now();
-            return true;
-          }
-          return false;
-        });
-
-        const terminalPromise = actor.page.waitForResponse(async response => {
-          if (response.url().includes(`/api/squads/${squad.id}/beer-calls/jobs/`) && response.status() === 200) {
-            try {
-              const body = await response.json() as { status: string };
-              if (body.status === 'succeeded' || body.status === 'rejected' || body.status === 'failed') {
-                tCompleted = performance.now();
-                return true;
-              }
-            } catch {
-              return false;
-            }
-          }
-          return false;
-        });
-
-        // Début chronométrage clic
-        const tClick = performance.now();
-        await actor.page.getByRole('button', { name: "LANCER L'APPEL", exact: true }).click();
-
-        const acceptedResponse = await acceptedPromise;
-        tPostReceived = performance.now();
-        expect(acceptedResponse.status()).toBe(202);
-        const jobData = await acceptedResponse.json() as { job_id: string; status: string };
-
-        const terminalResponse = await terminalPromise;
-        const terminalData = await terminalResponse.json() as { id: string; status: string };
-
-        const measurement: LatencyMeasurement = {
-          attempt: i + 1,
-          kind,
-          photoHash: photo.hash,
-          jobId: jobData.job_id,
-          verdict: terminalData.status,
-          clickToPostMs: Math.round(tPostSent - tClick),
-          postToAcceptedMs: Math.round(tPostReceived - tPostSent),
-          acceptedToResultMs: Math.round(tCompleted - tPostReceived),
-          totalDurationMs: Math.round(tCompleted - tClick),
-          timestampUtc: new Date().toISOString(),
+        const modal = actor.page.getByRole('heading', { name: "Valider l'Apéro", exact: true });
+        await expect(modal).toBeVisible();
+        await expect(actor.page.getByText('Alerte Fraude 🚨', { exact: true })).toHaveCount(0);
+        await expect(actor.page.getByText('Une erreur technique est survenue.', { exact: true })).toHaveCount(0);
+        const submit = actor.page.getByRole('button', { name: "LANCER L'APPEL", exact: true });
+        await expect(submit).toBeEnabled();
+        observer = observeJob(actor.page, squad.id);
+        failureStage = 'request/202';
+        timestampUtc = new Date().toISOString();
+        observer.marks.click = performance.now();
+        await submit.click();
+        await expect.poll(() => observer!.faults.length ? 'erreur' : observer!.acceptedId ? 'accepté' : 'attente', { timeout: 15_000, intervals: [20, 50, 100] }).toBe('accepté');
+        failureStage = 'résultat/UI';
+        await expect.poll(() => observer!.faults.length ? 'erreur' : observer!.terminal ? 'terminal' : 'attente', { timeout: 120_000, intervals: [20, 50, 100] }).toBe('terminal');
+        const received = observer.terminal!;
+        terminal = received.body;
+        observer.marks.terminal = received.at;
+        if (terminal.status === 'succeeded') {
+          await modal.waitFor({ state: 'hidden', timeout: 15_000 });
+          await actor.page.getByRole('heading', { name: locationName, exact: true }).waitFor({ state: 'visible', timeout: 15_000 });
+        } else if (terminal.status === 'rejected') {
+          await actor.page.getByText('Alerte Fraude 🚨', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 });
+          await actor.page.getByText('Désolé, aucune boisson détectée !', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 });
+        } else {
+          await actor.page.getByText('Une erreur technique est survenue.', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 });
+        }
+        observer.marks.ui = performance.now();
+        ui = { ...terminal };
+        durations = correlateTimeline(observer.marks, observer.acceptedId!, terminal, ui);
+        failureStage = 'corrélation serveur';
+        const workerEvents = readTimings(qualified.stack.worker);
+        correlation = correlateLogs([], workerEvents, terminal.id, terminal.status);
+        correlation = correlateLogs(readTimings(qualified.stack.api), workerEvents, terminal.id, terminal.status);
+        guard(!operator.run.firstJobOfProcess || workerEvents.every(e => e.phase !== 'claimed' || e.job_id === terminal!.id), 'un autre job a précédé cet essai froid/restart');
+        const active = validateStack(observeContainers());
+        guard((['api', 'worker', 'frontend', 'proxy'] as const).every(role => {
+          const before = qualified.stack[role], after = active[role];
+          return before.id === after.id && before.image === after.image && before.hostPid === after.hostPid && before.startedAt === after.startedAt && before.nanoCpus === after.nanoCpus && before.memory === after.memory;
+        }), 'stack ou limites modifiées pendant la mesure');
+        guard(active.worker.id === qualified.stack.worker.id && active.worker.hostPid === operator.run.process.hostPid && active.worker.startedAt === operator.run.process.startedAt, 'worker redémarré pendant la mesure');
+        guard(backendObservation(active.worker, []).weights === operator.metadata.weightsSha256, 'poids réellement employés non conformes');
+        guard(correlation.complete, 'phases serveur inconnues ou non corrélables ; prescription complémentaire nécessaire');
+        await observer.drain();
+        guard(observer.posts === 1 && observer.faults.length === 0, 'soumission nominale unique');
+        guard(terminal.status === (kind === 'drink' ? 'succeeded' : 'rejected'), 'verdict réel non conforme au corpus sélectionné');
+    } catch {
+      technicalFailure = true;
+    } finally {
+      observer?.detach();
+      try {
+        if (actor) await actor.context.close();
+        if (observer) await observer.drain();
+      } catch { technicalFailure = true; }
+      try {
+        const marks = observer?.marks ?? {};
+        const run = {
+          ...operator.selection, attempt: operator.run.attempt, epoch: operator.run.epoch, process: operator.run.process,
+          firstJobOfProcess: operator.run.firstJobOfProcess, startupMs: operator.run.startupMs,
+          photoHash: photo.hash, job_id: observer?.acceptedId ?? 'inconnue', verdict: technicalFailure ? 'failed' : terminal!.status, observedVerdict: terminal?.status ?? 'inconnue', timestampUtc,
+          ...(durations ?? partialDurations(marks)),
+          technicalFailure, failureStage: technicalFailure ? failureStage : null,
+          postsObserved: observer?.posts ?? 0,
+          containers: Object.fromEntries(['api', 'worker'].map(role => {
+            const c = qualified.stack[role as 'api' | 'worker'];
+            return [role, { id: c.id, hostPid: c.hostPid, startedAt: c.startedAt }];
+          })),
+          driverMarks: { click: marks.click ?? 'inconnue', request: marks.request ?? 'inconnue', accepted: marks.accepted ?? 'inconnue', terminal: marks.terminal ?? 'inconnue', ui: marks.ui ?? 'inconnue' },
+          ui: ui ? { job_id: ui.id, state: ui.status, isolatedActor: true, source: 'GET applicatif réel puis état UI visible' } : 'inconnue',
+          correlation: correlation ?? { phases: Object.fromEntries(phases.map(phase => [phase, 'inconnue'])), complete: false },
+          warmup: operator.run.warmupJobId ? history.filter(e => e.job_id === operator.run.warmupJobId) : null,
+          limits: 'Durées observées par le pilote Node monotone, incluant transport et résolution des attentes UI ; pas une mesure physique écran. Startup opérateur séparé. Phases absentes inconnues. Aucun bouton de récupération utilisé.',
         };
-
-        runs.push(measurement);
-        console.log(`[T07a Latence] Essai ${i + 1} (${kind}): Total=${measurement.totalDurationMs}ms, Post202=${measurement.postToAcceptedMs}ms, JobAI=${measurement.acceptedToResultMs}ms, Verdict=${measurement.verdict}`);
-      } finally {
-        await actor.context.close();
-      }
+        atomicWriteOnce(output, { schemaVersion: 2, variant: operator.variant, protocol: operator.protocol, metadata: operator.metadata, runs: [run] });
+      } finally { unlinkSync(reservation); }
     }
+    // Un refus no_drink attendu est nominal ; les pannes/données incomplètes
+    // conservent leur fichier, mais le runner sort non0 (jamais test.fail/skip).
+    guard(!technicalFailure, 'essai technique incomplet ou non conforme, fichier immuable conservé');
+  });
 
-    const outputPath = resolve(resultsDir, 'latency-runs.json');
-    writeFileSync(outputPath, JSON.stringify({ runs }, null, 2), 'utf-8');
-    console.log(`[T07a Latence] Données de banc enregistrées sous ${outputPath}`);
+  test('contrôles de corrélation — ordre, identité, logs et immutabilité synthétiques', async () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const other = '22222222-2222-4222-8222-222222222222';
+    const marks = { click: 0, request: 10, accepted: 30, terminal: 80, ui: 100 };
+    const result: JobResult = { id, status: 'succeeded' };
+    expect(correlateTimeline(marks, id, result, result)).toEqual({ clickToPostMs: 10, postToAcceptedMs: 20, acceptedToResultMs: 70, totalDurationMs: 100 });
+    const refused: JobResult = { id, status: 'rejected' };
+    expect(() => correlateTimeline(marks, id, refused, refused)).not.toThrow();
+    for (const invalid of [
+      { ...marks, request: -1 }, { ...marks, request: NaN }, { ...marks, accepted: Infinity },
+      { ...marks, accepted: 5 }, { ...marks, terminal: 20 }, { ...marks, ui: 70 }, { ...marks, ui: undefined },
+    ]) expect(() => correlateTimeline(invalid, id, result, result)).toThrow();
+    expect(() => correlateTimeline(marks, id, { ...result, id: other }, result)).toThrow(/corrélation/);
+    expect(() => correlateTimeline(marks, id, result, { ...result, id: other })).toThrow(/corrélation/);
+    expect(() => correlateTimeline(marks, id, result, refused)).toThrow(/corrélation/);
+    expect(partialDurations({ click: 0, request: 10 })).toEqual({ clickToPostMs: 10, postToAcceptedMs: 'inconnue', acceptedToResultMs: 'inconnue', totalDurationMs: 'inconnue' });
+
+    // Émetteur local, pas de serveur, de socket ni de navigateur. Une réponse202
+    // doit correspondre à l'objet Request observé et un autre job ne suffit pas.
+    const emitter = new EventEmitter();
+    const page = emitter as unknown as Page;
+    const observed = observeJob(page, 42);
+    const endpoint = `${baseURL}/api/squads/42/beer-calls/`;
+    const post = { url: () => endpoint, method: () => 'POST' } as unknown as Request;
+    const get = { method: () => 'GET' } as unknown as Request;
+    const response = (url: string, request: Request, status: number, body: unknown) => ({ url: () => url, request: () => request, status: () => status, json: async () => body }) as unknown as Response;
+    try {
+      observed.marks.click = performance.now();
+      emitter.emit('request', post);
+      emitter.emit('response', response(endpoint, post, 202, { job_id: id }));
+      emitter.emit('response', response(`${endpoint}jobs/${other}`, get, 200, { id: other, status: 'succeeded' }));
+      await observed.drain();
+      expect(observed.acceptedId).toBe(id);
+      expect(observed.terminal).toBeUndefined();
+      expect(observed.marks.accepted).toBeGreaterThanOrEqual(observed.marks.request!);
+      emitter.emit('response', response(`${endpoint}jobs/${id}`, get, 200, result));
+      await observed.drain();
+      expect(observed.terminal?.body).toEqual(result);
+      emitter.emit('request', post);
+      expect(observed.posts).toBe(2);
+      expect(observed.faults).toContain('POST dupliqué');
+    } finally { observed.detach(); await observed.drain(); }
+    expect(emitter.listenerCount('request')).toBe(0);
+    expect(emitter.listenerCount('response')).toBe(0);
+
+    const event = (phase: string, index: number): TimingEvent => ({ phase, job_id: id, pid: 1, attempt: phase === 'enqueued' ? 0 : 1,
+      utc: new Date(Date.parse('2026-10-27T00:00:00.000Z') + index * 10).toISOString(),
+      ...(['file_read', 'detector_total', 'finalization'].includes(phase) ? { duration_ms: 2 } : {}),
+      ...(phase === 'result' ? { outcome: 'succeeded' } : {}),
+    });
+    const api = [event('enqueued', 0)];
+    const worker = phases.slice(1).map((phase, index) => event(phase, index + 1));
+    expect(correlateLogs(api, worker, id, 'succeeded').complete).toBe(true);
+    expect(correlateLogs(api, worker, id, 'succeeded').queueUtcMs).toBe(10);
+    expect(correlateLogs(api, worker, other, 'succeeded').complete).toBe(false);
+    const missing = correlateLogs(api, worker.filter(e => e.phase !== 'detector_total'), id, 'succeeded');
+    expect(missing.phases.detector_total).toBe('inconnue');
+    expect(missing.complete).toBe(false);
+    expect(correlateLogs([], worker, id, 'succeeded').queueUtcMs).toBe('inconnue');
+    expect(correlateLogs([event('enqueued', 9)], worker, id, 'succeeded').complete).toBe(false);
+    expect(correlateLogs(api, worker.map(e => e.phase === 'result' ? { ...e, attempt: 2 } : e), id, 'succeeded').complete).toBe(false);
+    expect(correlateLogs(api, worker.map(e => e.phase === 'result' ? { ...e, pid: 2 } : e), id, 'succeeded').complete).toBe(false);
+    const raw = `INFO:worker:${JSON.stringify({ event: 'beer_job_timing', ...worker[0], token: 'NEVER_EXPORT' })}`;
+    expect(JSON.stringify(parseTimings(raw))).not.toContain('NEVER_EXPORT');
+    expect(parseTimings('non-json\n{invalid')).toEqual([]);
+    expect(() => parseTimings(JSON.stringify({ event: 'beer_job_timing', ...worker[1], duration_ms: -1 }))).toThrow();
+    const operator: Operator = { schemaVersion: 2, variant: 'A', metadata: { corpus: {} as Record<Kind, CorpusEntry> },
+      protocol: { seed: 20261025, counts: COUNTS, timingPrecisionMs: 1 }, selection: { category: 'cold-image', repetition: 1, kind: 'drink' },
+      run: { epoch: 'contrôle-synthétique', attempt: 1, startupMs: 0, firstJobOfProcess: true, process: { hostPid: 1, startedAt: '2026-10-27T00:00:00.000Z' }, weightsInitiallyPresent: false } };
+    expect(() => validateHistory([], operator)).not.toThrow();
+    expect(() => validateHistory(worker, operator)).toThrow(/premier job/);
+    operator.selection.category = 'warm';
+    operator.run.warmupJobId = id;
+    const warmup = worker.map(e => ({ ...e, status: 'success' }));
+    expect(() => validateHistory(warmup, operator)).not.toThrow();
+    expect(() => validateHistory([], operator)).toThrow(/chauffe/);
+
+    const map: SceneSignal = { instanceId: 'map:1', view: 'dashboard', generation: 1, timestamp: 10 };
+    const avatar: SceneSignal = { instanceId: 'avatar:2', view: 'dashboard', generation: 1, timestamp: 20, drawCalls: 2 };
+    const scene = { mapInteractive: map, avatarFrameSubmitted: avatar, sceneUsable: { ...avatar } };
+    expect(currentScene(scene)).toBe(true);
+    expect(currentScene({ ...scene, avatarFrameSubmitted: { ...avatar, drawCalls: 0 } })).toBe(false);
+    expect(currentScene({ ...scene, avatarFrameSubmitted: { ...avatar, generation: 2 } })).toBe(false);
+    expect(currentScene({ ...scene, avatarFrameSubmitted: { ...avatar, view: 'profile' } })).toBe(false);
+    expect(currentScene({})).toBe(false);
+
+    // Vérifier la parité avec T41 via Node natif (le collecteur CJS ne doit
+    // ni transpiler le CLI ESM ni le lancer pendant --list).
+    const summaryUrl = pathToFileURL(join(__dirname, 'summarize-latency.mjs')).href;
+    const schedule = parseJson(command(process.execPath, ['--input-type=module', '-e', `import {makeSchedule} from ${JSON.stringify(summaryUrl)}; process.stdout.write(JSON.stringify(makeSchedule()))`]), 'seed T41');
+    expect(makeSchedule()).toEqual(schedule);
+    const directory = mkdtempSync(join(approvedRoot, 't43-controls-'));
+    const path = join(directory, 'synthetic-run.json');
+    try {
+      atomicWriteOnce(path, { synthetic: true, attempt: 1 });
+      expect(() => atomicWriteOnce(path, { synthetic: true, attempt: 2 })).toThrow();
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ synthetic: true, attempt: 1 });
+      expect(readdirSync(directory)).toEqual(['synthetic-run.json']);
+    } finally { if (existsSync(path)) unlinkSync(path); rmdirSync(directory); }
   });
 
   test('contrôles d’entrée — sans navigateur ni backend', async () => {
