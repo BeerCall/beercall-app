@@ -26,7 +26,8 @@ try {
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: /ux-(pwa|mobile-shell)\.spec\.ts/,
+  testMatch: /ux-(pwa|mobile-shell|avatar-framing)\.spec\.ts/,
+  timeout: 120_000,
   fullyParallel: false,
   workers: 1,
   retries: 0,
