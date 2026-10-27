@@ -49,6 +49,15 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
     const contextEntries = new WeakMap<object, InternalTrackedEntry>();
     const canvasDraws = new WeakMap<HTMLCanvasElement, number>();
     const trackedEntries: InternalTrackedEntry[] = [];
+    function weakCleanup(canvasRef: WeakRef<HTMLCanvasElement>, onLost: () => void, onRestored: () => void) {
+      // Cette fermeture est créée hors getContext : aucun `this`/canvas natif
+      // ne reste retenu par la liste des nettoyages après son démontage.
+      return () => {
+        const canvas = canvasRef.deref();
+        canvas?.removeEventListener('webglcontextlost', onLost);
+        canvas?.removeEventListener('webglcontextrestored', onRestored);
+      };
+    }
 
     const metrics = {
       contextsCreated: 0,
@@ -72,7 +81,7 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
     window.__stabilityCanvasDraws = (canvas: HTMLCanvasElement) => canvasDraws.get(canvas) ?? 0;
 
     HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args: unknown[]) {
-      const context = originalGetContext.apply(this, args);
+      const context = Reflect.apply(originalGetContext, this, args) as RenderingContext | null;
       const type = args[0];
       if (context && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
         const obj = context as object;
@@ -115,10 +124,7 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
 
           this.addEventListener('webglcontextlost', onLost);
           this.addEventListener('webglcontextrestored', onRestored);
-          cleanups.push(() => {
-            this.removeEventListener('webglcontextlost', onLost);
-            this.removeEventListener('webglcontextrestored', onRestored);
-          });
+          cleanups.push(weakCleanup(entry.canvasRef, onLost, onRestored));
         }
       }
       return context;

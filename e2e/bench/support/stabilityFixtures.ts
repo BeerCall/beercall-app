@@ -98,20 +98,30 @@ export const STABILITY_SQUAD: Squad = {
   invite_code: 'STAB01',
 };
 
+export function makeSameConnections(): StabilityConnection[] {
+  return Array.from({ length: 30 }, (_, index) => ({
+    id: `conn_${index + 1}`,
+    username: `Camarade_${index + 1}`,
+    caps: (index + 1) * 10,
+    score: (index + 1) * 100,
+    title: index % 2 === 0 ? 'Vétéran du Bar' : 'Novice de l’Apéro',
+    avatar: { ...SAME_AVATAR },
+  }));
+}
+
+export function makeVariedConnections(): StabilityConnection[] {
+  return Array.from({ length: 30 }, (_, index) => ({
+    id: `conn_${index + 1}`,
+    username: `Camarade_${index + 1}`,
+    caps: (index + 1) * 10,
+    score: (index + 1) * 100,
+    title: index % 2 === 0 ? 'Vétéran du Bar' : 'Novice de l’Apéro',
+    avatar: { ...VARIED_AVATARS[index % VARIED_AVATARS.length] },
+  }));
+}
+
 export function makeStabilityConnections(): StabilityConnection[] {
-  return Array.from({ length: 30 }, (_, index) => {
-    const avatar = index < 10
-      ? { ...SAME_AVATAR }
-      : { ...VARIED_AVATARS[(index - 10) % VARIED_AVATARS.length] };
-    return {
-      id: `conn_${index + 1}`,
-      username: `Camarade_${index + 1}`,
-      caps: (index + 1) * 10,
-      score: (index + 1) * 100,
-      title: index % 2 === 0 ? 'Vétéran du Bar' : 'Novice de l’Apéro',
-      avatar,
-    };
-  });
+  return makeSameConnections();
 }
 
 export function avatarModelNames(avatar: StabilityAvatar): string[] {
@@ -255,9 +265,9 @@ export async function installStabilityFixtures(
   options: StabilityFixtureOptions = {},
 ) {
   const avatar = options.avatar ?? SAME_AVATAR;
-  const connections = options.connections ?? makeStabilityConnections();
+  let currentConnections = options.connections ?? makeSameConnections();
   const modelNames = new Set<string>(['Animations.fbx']);
-  for (const config of [avatar, ...connections.map(connection => connection.avatar)]) {
+  for (const config of [avatar, SAME_AVATAR, ...VARIED_AVATARS, ...currentConnections.map(connection => connection.avatar)]) {
     for (const name of avatarModelNames(config)) modelNames.add(name);
   }
 
@@ -305,7 +315,7 @@ export async function installStabilityFixtures(
       method: 'GET',
       path: '/api/auth/connections',
       respond: async route => {
-        await route.fulfill({ status: 200, json: connections });
+        await route.fulfill({ status: 200, json: currentConnections });
       },
     },
   ];
@@ -372,7 +382,12 @@ export async function installStabilityFixtures(
 
   return {
     avatar,
-    connections,
+    get connections() {
+      return currentConnections;
+    },
+    setConnections(next: StabilityConnection[]) {
+      currentConnections = next;
+    },
     isolation,
     models,
     modelHits,
