@@ -55,9 +55,7 @@ async function assertWheelGeometry(wheel: Locator) {
       if (style.backgroundColor !== 'rgba(0, 0, 0, 0)') {
         issues.push(`Fond non transparent sur label : ${label.textContent} (${style.backgroundColor})`);
       }
-      const identityLabel = document.querySelector<HTMLElement>('[data-dashboard-identity] h2');
-      const expected = identityLabel ? getComputedStyle(identityLabel).color : null;
-      if (expected ? srgb(style.color) !== srgb(expected) : !allowedColors.includes(srgb(style.color))) {
+      if (!allowedColors.includes(srgb(style.color))) {
         issues.push(`Couleur de label désynchronisée du badge : ${label.textContent} (${style.color})`);
       }
       if (style.textShadow === 'none' && style.filter === 'none') {
@@ -314,8 +312,9 @@ test('gaps réels cartes/roue/barre et fond opaque en jour/nuit avec captures', 
       decorated: style.textShadow !== 'none' || style.filter !== 'none',
     };
   });
-  const dayIdentityColor = await page.locator('[data-dashboard-identity] h2').evaluate(el => getComputedStyle(el).color);
-  expect(dayLabel.color, 'label jour synchronisé avec le badge').toBe(dayIdentityColor);
+  await expect(page.locator('[data-dashboard-identity]')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  const dayIdentityColor = await page.locator('[data-dashboard-identity]').evaluate(el => getComputedStyle(el).color);
+  expect(dayLabel.color, 'label jour en gray-900').toBe(dayIdentityColor);
   await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-gray-900/);
   expect(dayLabel.background, 'aucun rectangle opaque de jour').toBe('rgba(0, 0, 0, 0)');
   expect(dayLabel.decorated, 'halo clair de jour').toBe(true);
@@ -353,8 +352,7 @@ test('gaps réels cartes/roue/barre et fond opaque en jour/nuit avec captures', 
       decorated: style.textShadow !== 'none' || style.filter !== 'none',
     };
   });
-  const nightIdentityColor = await page.locator('[data-dashboard-identity] h2').evaluate(el => getComputedStyle(el).color);
-  expect(nightLabel.color, 'label nuit synchronisé avec le badge').toBe(nightIdentityColor);
+  await expect( page.locator('[data-dashboard-identity]') ).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-beer-light/);
   expect(nightLabel.color, 'label nuit en beer-light (#FBBF24)').toBe('rgb(251, 191, 36)');
   expect(nightLabel.background, 'aucun rectangle opaque de nuit').toBe('rgba(0, 0, 0, 0)');

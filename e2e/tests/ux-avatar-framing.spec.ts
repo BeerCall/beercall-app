@@ -636,6 +636,8 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
       await openConnexionsPage(page);
 
       // Scroll aux extrémités pour vérifier le budget de thumbnail
+      await page.getByTestId('avatar-thumb-3').evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
+      await expect(page.getByTestId('avatar-thumb-3').locator('[data-avatar-framing="ready"]')).toBeVisible({ timeout: 45_000 });
       await page.getByTestId('avatar-thumb-30').evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
       await expect(page.getByTestId('avatar-thumb-30').locator('[data-avatar-framing="ready"]')).toBeVisible({ timeout: 45_000 });
 
