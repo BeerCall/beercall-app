@@ -121,6 +121,9 @@ export function avatarModelNames(avatar: StabilityAvatar): string[] {
 }
 
 export function assertModelWhitelist(allowed: ReadonlySet<string>, requested: readonly string[]): void {
+  if (requested.length === 0) {
+    throw new Error('Liste de modèles vide : au moins un modèle requis');
+  }
   const unknown = requested.filter(name => !allowed.has(name));
   if (unknown.length > 0) {
     throw new Error(`Modèle(s) hors whitelist : ${unknown.join(', ')}`);
@@ -136,6 +139,95 @@ export function assertSingleDocument(documents: readonly string[]): void {
 export function assertFrames(drawCalls: number, label: string): void {
   if (!Number.isFinite(drawCalls) || drawCalls <= 0) {
     throw new Error(`${label} : aucune frame réelle (draw calls = ${drawCalls})`);
+  }
+}
+
+export function assertFrameProgress(before: number, after: number, label = 'Frame'): void {
+  if (!Number.isFinite(before) || !Number.isFinite(after)) {
+    throw new Error(`${label} : valeurs de draw calls invalides (avant=${before}, après=${after})`);
+  }
+  if (after <= before) {
+    throw new Error(`${label} : progression requise (après=${after} <= avant=${before})`);
+  }
+}
+
+export interface ContextInventoryCheckpoint {
+  cycle: number;
+  phase?: string;
+  activeContexts: number;
+  contextsCreated?: number;
+}
+
+export function assertContextInventory(
+  checkpoints: readonly ContextInventoryCheckpoint[] | readonly number[],
+  options: { maxActive?: number } = {},
+): void {
+  const maxActive = options.maxActive ?? 4;
+  const normalized: ContextInventoryCheckpoint[] = checkpoints.map((cp, idx) =>
+    typeof cp === 'number' ? { cycle: idx + 1, activeContexts: cp } : cp,
+  );
+  if (normalized.length === 0) {
+    throw new Error('Inventaire vide : aucun checkpoint observé');
+  }
+  // 1. Observer CHAQUE checkpoint, pas seulement le dernier
+  for (const cp of normalized) {
+    if (!Number.isFinite(cp.activeContexts) || cp.activeContexts < 0) {
+      throw new Error(`Cycle ${cp.cycle} : activeContexts invalide (${cp.activeContexts})`);
+    }
+    if (cp.activeContexts > maxActive) {
+      throw new Error(
+        `Cycle ${cp.cycle} : activeContexts (${cp.activeContexts}) dépasse le plafond autorisé de ${maxActive}`,
+      );
+    }
+  }
+  // 2. Détecter l'inventaire croissant avec chute finale artificielle
+  if (normalized.length >= 4) {
+    const values = normalized.map(c => c.activeContexts);
+    const lastIndex = values.length - 1;
+    let strictlyIncreasingUntilLast = true;
+    for (let i = 0; i < lastIndex - 1; i++) {
+      if (values[i + 1] <= values[i]) {
+        strictlyIncreasingUntilLast = false;
+        break;
+      }
+    }
+    if (strictlyIncreasingUntilLast && values[lastIndex] < values[lastIndex - 1]) {
+      throw new Error(
+        `Inventaire non stabilisé : croissance continue avec chute finale artificielle ([${values.join(', ')}])`,
+      );
+    }
+  }
+}
+
+export interface ContextAccountingData {
+  contextsCreated: number;
+  contextsLost: number;
+  contextsRestored: number;
+  activeContexts: number;
+  contexts?: Array<{ id: string; status: 'live' | 'lost' | 'restored' }>;
+}
+
+export function assertContextAccounting(data: ContextAccountingData): void {
+  const { contextsCreated, contextsLost, contextsRestored, activeContexts, contexts } = data;
+  if (contexts) {
+    const ids = new Set<string>();
+    for (const ctx of contexts) {
+      if (ids.has(ctx.id)) {
+        throw new Error(`Contexte doublé détecté : identifiant dupliqué ${ctx.id}`);
+      }
+      ids.add(ctx.id);
+    }
+    const expectedActive = contexts.filter(c => c.status === 'live' || c.status === 'restored').length;
+    if (activeContexts !== expectedActive) {
+      throw new Error(
+        `activeContexts incohérent : calculé=${activeContexts}, états réels=${expectedActive}`,
+      );
+    }
+  }
+  if (contextsRestored > 0 && activeContexts === (contextsCreated - contextsLost)) {
+    throw new Error(
+      `Comptage de contextes erroné : formule naïve created - lost (${contextsCreated} - ${contextsLost} = ${activeContexts}) ignore les ${contextsRestored} restaurations`,
+    );
   }
 }
 
