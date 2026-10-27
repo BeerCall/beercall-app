@@ -312,10 +312,6 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
             document.head.appendChild(style);
           }
           style.textContent = `
-            [data-bottom-nav] {
-              height: calc(58px + ${bottom}px) !important;
-              padding-bottom: ${bottom}px !important;
-            }
             div:has(> [data-dashboard-identity]) {
               top: calc(8px + ${top}px) !important;
             }
@@ -331,7 +327,7 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
         await expect(nav, matrix.label).toBeVisible();
         const navBox = await nav.boundingBox();
         expect(navBox, `Barre mesurable (${matrix.label})`).not.toBeNull();
-        expect(navBox!.height, `Hauteur 58+bas (${matrix.label})`).toBeCloseTo(58 + matrix.bottom, 0);
+        expect(navBox!.height, `Hauteur compacte 64px (${matrix.label})`).toBeCloseTo(64, 0);
         expect(navBox!.y + navBox!.height, `Barre dans l'écran (${matrix.label})`)
           .toBeLessThanOrEqual(matrix.height + 0.5);
 
@@ -342,8 +338,8 @@ test.describe('Mobile Shell & Confinement des gestes (UX-03)', () => {
         expect(profileBox!.width, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
         expect(profileBox!.height, `Profil 56px (${matrix.label})`).toBeCloseTo(56, 0);
         expect(profileBox!.y, `Profil dans la barre (${matrix.label})`).toBeGreaterThanOrEqual(navBox!.y - 0.5);
-        expect(profileBox!.y + profileBox!.height, `Profil au-dessus de l'inset bas (${matrix.label})`)
-          .toBeLessThanOrEqual(navBox!.y + 58 + 0.5);
+        expect(profileBox!.y + profileBox!.height, `Profil dans la bande compacte (${matrix.label})`)
+          .toBeLessThanOrEqual(navBox!.y + 64 + 0.5);
 
         const identity = page.locator('[data-dashboard-identity]');
         await expect(identity, matrix.label).toBeVisible();
