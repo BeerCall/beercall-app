@@ -22,6 +22,20 @@ async function assertWheelGeometry(wheel: Locator) {
     const rect = (el: Element) => el.getBoundingClientRect();
     const intersection = (a: DOMRect, b: DOMRect) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) *
       Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    // CSS Color 4 peut sérialiser la même couleur en oklch, rgb ou color().
+    // Comparer les pixels sRGB opaques, pas ces écritures ; aucune tolérance de palette.
+    const swatch = document.createElement('canvas');
+    swatch.width = swatch.height = 1;
+    const colorContext = swatch.getContext('2d', { willReadFrequently: true });
+    if (!colorContext) throw new Error('Normalisation sRGB indisponible');
+    const srgb = (color: string) => {
+      if (!CSS.supports('color', color)) throw new Error(`Couleur CSS invalide : ${color}`);
+      colorContext.clearRect(0, 0, 1, 1);
+      colorContext.fillStyle = color;
+      colorContext.fillRect(0, 0, 1, 1);
+      return [...colorContext.getImageData(0, 0, 1, 1).data].join(',');
+    };
+    const allowedColors = ['rgb(16, 24, 40)', 'rgb(251, 191, 36)'].map(srgb);
     for (const el of [...buttons, ...labels]) {
       const r = rect(el);
       if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight ||
@@ -43,7 +57,7 @@ async function assertWheelGeometry(wheel: Locator) {
       }
       const identityLabel = document.querySelector<HTMLElement>('[data-dashboard-identity] h2');
       const expected = identityLabel ? getComputedStyle(identityLabel).color : null;
-      if (expected ? style.color !== expected : !['rgb(16, 24, 40)', 'rgb(251, 191, 36)'].includes(style.color)) {
+      if (expected ? srgb(style.color) !== srgb(expected) : !allowedColors.includes(srgb(style.color))) {
         issues.push(`Couleur de label désynchronisée du badge : ${label.textContent} (${style.color})`);
       }
       if (style.textShadow === 'none' && style.filter === 'none') {
@@ -74,6 +88,18 @@ async function assertWheelGeometry(wheel: Locator) {
     return issues;
   }), 'Géométrie au repos : boutons, labels et compteur réellement visibles').toEqual([]);
 }
+
+test('contrôle négatif : une mauvaise couleur de label est refusée après normalisation sRGB', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { squads: makeSquads(0) });
+  await page.goto('/dashboard');
+  const wheel = page.getByRole('region', { name: 'Navigation des squads' });
+  await assertWheelGeometry(wheel);
+  await wheel.locator('[data-wheel-label]').first().evaluate(label => {
+    (label as HTMLElement).style.color = 'rgb(255, 0, 0)';
+  });
+  await expect(assertWheelGeometry(wheel)).rejects.toThrow(/Couleur de label désynchronisée/);
+  isolation.assertIsolated();
+});
 
 for (const viewport of viewports) {
   for (const count of [0, 1, 3, 4, 8, 12]) {
