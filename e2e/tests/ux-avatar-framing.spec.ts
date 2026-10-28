@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { installUxFixtures, type InstalledFixtures } from './support/uxFixtures';
 
+const backendWorkspace = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
+
 const MEN = {
   gender: 'Men',
   head: 'Men_head_Worker_0',
@@ -234,7 +236,7 @@ let cachedModels: Map<string, Buffer> | null = null;
 async function getCachedModels(): Promise<Map<string, Buffer>> {
   if (cachedModels) return cachedModels;
   const models = new Map<string, Buffer>();
-  const root = resolve(process.env.BEERCALL_WORKSPACE_BACKEND!, 'static/models');
+  const root = resolve(backendWorkspace, 'static/models');
   for (const [name, hash] of Object.entries(HASHES)) {
     const file = resolve(root, `${name}.fbx`);
     const rel = relative(root, file);
@@ -266,7 +268,7 @@ async function setupHarness(context: BrowserContext, page: Page, initialFriends?
     version: 1, threeRevision: '183', models: {},
   };
   if (preparedMode) {
-    const root = resolve(process.env.BEERCALL_WORKSPACE_BACKEND!, 'static/models/prepared');
+    const root = resolve(backendWorkspace, 'static/models/prepared');
     const manifest = JSON.parse(await readFile(resolve(root, 'manifest.json'), 'utf8')) as typeof preparedManifest;
     for (const [name, hash] of Object.entries(HASHES)) {
       const entry = manifest.models[`${name}.fbx`];
@@ -596,14 +598,12 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
         const canvas = page.getByTestId(`avatar-thumb-${outfit.id}`).locator('canvas');
         const rect = (await canvas.boundingBox())!;
 
-        if (process.env.BEERCALL_PREPARED_THUMBNAILS === '1') {
-          const framingInfo = JSON.parse((await page.getByTestId(`avatar-thumb-${outfit.id}`)
-            .locator('[data-avatar-framing-info]').getAttribute('data-avatar-framing-info'))!) as { cpuTimeMs: number; sampleCount: number };
-          expect(framingInfo.sampleCount, 'offline bounds retain the full Idle sampling contract').toBeGreaterThanOrEqual(240);
-          expect(framingInfo.cpuTimeMs, 'prepared framing CPU budget, not end-to-end iPhone latency').toBeLessThan(20);
-          console.log(JSON.stringify({ outfit: outfit.label, framingInfo }));
-          await info.attach('prepared-framing-budget', { body: JSON.stringify(framingInfo), contentType: 'application/json' });
-        }
+        const framingInfo = JSON.parse((await page.getByTestId(`avatar-thumb-${outfit.id}`)
+          .locator('[data-avatar-framing-info]').getAttribute('data-avatar-framing-info'))!) as { cpuTimeMs: number; sampleCount: number };
+        expect(framingInfo.sampleCount, 'offline bounds retain the full Idle sampling contract').toBeGreaterThanOrEqual(240);
+        expect(framingInfo.cpuTimeMs, 'framing CPU budget, not end-to-end latency').toBeLessThan(20);
+        console.log(JSON.stringify({ outfit: outfit.label, framingInfo }));
+        await info.attach('prepared-framing-budget', { body: JSON.stringify(framingInfo), contentType: 'application/json' });
 
         // 1. Assert initial framing
         assertFramed(first, outfit.config, rect.width, rect.height);

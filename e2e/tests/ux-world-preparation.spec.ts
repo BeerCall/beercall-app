@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fixtureCall, installUxFixtures } from './support/uxFixtures';
 
+const backendWorkspace = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
+
 test.use({ viewport: { width: 390, height: 844 } });
 const models = ['Bar.fbx', 'Swimming_pool.fbx', 'Floaty_Island.fbx'];
 
@@ -16,7 +18,7 @@ test('trois décors préparés sans Canvas ni jeu, puis une seule scène visible
   });
   const hits = new Map<string, number>();
   for (const name of models) {
-    const bytes = await readFile(resolve(process.env.BEERCALL_WORKSPACE_BACKEND!, 'static/models', name));
+    const bytes = await readFile(resolve(backendWorkspace, 'static/models', name));
     await context.route(`**/models/${name}`, route => {
       hits.set(name, (hits.get(name) ?? 0) + 1);
       return route.fulfill({ contentType: 'application/octet-stream', body: bytes });
