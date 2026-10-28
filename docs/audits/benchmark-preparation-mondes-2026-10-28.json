@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-28",
+  "referenceFrontend": "e453ffa",
+  "environment": "Windows 10, Intel i7-6500U, local Chromium 390x844, empty worlds with real FBX assets, isolated API fixtures",
+  "metric": "click to real worldFrameSubmitted with positive draw calls, not physical iPhone display",
+  "protocol": { "runsPerVariant": 3, "order": "three reference contexts then three prepared contexts", "worldOrder": ["bar", "piscine", "dodo"], "newBrowserContextPerRun": true, "preparedWaitsForAllThreeModels": true, "gpuPreparation": false },
+  "sourceModelBytes": { "Bar.fbx": 4567372, "Swimming_pool.fbx": 2734896, "Floaty_Island.fbx": 1155552 },
+  "before": [
+    { "barMs": 2835.900000035763, "piscineMs": 900.0999999642372, "dodoMs": 507.69999998807907 },
+    { "barMs": 2902, "piscineMs": 937.6999999880791, "dodoMs": 549 },
+    { "barMs": 2837.800000011921, "piscineMs": 864.6000000238419, "dodoMs": 463 }
+  ],
+  "after": [
+    { "barMs": 1706.199999988079, "piscineMs": 518.3000000119209, "dodoMs": 182.20000004768372 },
+    { "barMs": 1587.699999988079, "piscineMs": 483.5, "dodoMs": 255.19999998807907 },
+    { "barMs": 1787.6000000238419, "piscineMs": 478, "dodoMs": 164.60000002384186 }
+  ],
+  "checksPerRun": { "worldModelsRequestedExactlyOnce": 3, "worldCanvasesBeforeOpening": 0, "simultaneousVisibleWorldCanvases": 1, "gameRequestsBeforeOpening": 0, "gameMutations": 0, "drawCallsByWorld": { "bar": 18, "piscine": 1, "dodo": 12 } },
+  "limitations": ["No physical iPhone or mobile GPU benchmark", "World participants are empty", "Speculative preparation takes time before opening and does not remove total work", "CPU parsing, shader compilation, fonts and texture upload not individually profiled", "Three runs do not qualify tail latency, memory, battery or thermals"]
+}

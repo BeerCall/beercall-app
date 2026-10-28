@@ -220,6 +220,11 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
       return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: hdr });
     }
     if (path.startsWith('/models/')) {
+      if (['/models/Bar.fbx', '/models/Swimming_pool.fbx', '/models/Floaty_Island.fbx'].includes(path) && method === 'GET') {
+        // Most UX tests deliberately have no decor assets. Exercise the optional
+        // warm-up failure path; world-specific tests override these three routes.
+        return route.fulfill({ status: 503, body: 'Static world assets unavailable in this fixture' });
+      }
       if (path === '/models/Animations.fbx' && animations && method === 'GET') {
         rawFbxHits++;
         return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: animations });

@@ -320,6 +320,9 @@ async function setupHarness(context: BrowserContext, page: Page, initialFriends?
 
   await context.route('**/models/**', async (route: any) => {
     const path = new URL(route.request().url()).pathname;
+    if (['/models/Bar.fbx', '/models/Swimming_pool.fbx', '/models/Floaty_Island.fbx'].includes(path) && route.request().method() === 'GET') {
+      return route.fallback(); // explicit unavailable-decor fixture, outside avatar whitelist
+    }
     if (path === '/models/prepared/manifest.json') {
       return route.fulfill({ json: preparedManifest });
     }
