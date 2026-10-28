@@ -434,9 +434,12 @@ function currentScene(signals: Record<string, SceneSignal>): boolean {
   return Boolean(map && avatar && usable && [map, avatar, usable].every(s => s.view === 'dashboard' && nonempty(s.instanceId) && finite(s.timestamp) && s.timestamp > 0 && Number.isSafeInteger(s.generation) && Number(s.generation) > 0) &&
     map.generation === avatar.generation && usable.generation === map.generation && finite(avatar.drawCalls) && avatar.drawCalls > 0 && usable.timestamp === Math.max(Number(map.timestamp), Number(avatar.timestamp)));
 }
-async function waitForCurrentScene(page: Page): Promise<void> {
+async function waitForCurrentScene(page: Page, stage: (name: string) => void): Promise<void> {
+  stage('préparation/scène/carte-visible');
   await expect(page.locator('div.maplibregl-map canvas.maplibregl-canvas')).toBeVisible({ timeout: 30_000 });
+  stage('préparation/scène/avatar-visible');
   await expect(page.getByRole('button', { name: 'Créer un Beer Call', exact: true }).locator('canvas')).toBeVisible({ timeout: 30_000 });
+  stage('préparation/scène/signaux-courants');
   await expect.poll(async () => {
     const signals = await page.evaluate(() => (window as unknown as { __beercall_scene_metrics?: Record<string, SceneSignal> }).__beercall_scene_metrics ?? {});
     return currentScene(signals);
@@ -519,9 +522,11 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
     let failureStage = 'préparation';
     let timestampUtc = new Date().toISOString();
     try {
+      failureStage = 'préparation/acteur';
       actor = await registerActor(browser);
         // Créer une squad neuve pour cet essai
         const squadName = `Squad Latency ${unique()}`;
+        failureStage = 'préparation/création-squad';
         const createdSquad = await actor.context.request.post('/api/squads/', {
           headers: { Authorization: `Bearer ${actor.token}` },
           data: { name: squadName, icon: 'beer', color: '#F59E0B' },
@@ -531,21 +536,27 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
         const squad = await createdSquad.json() as { id: number };
 
         // Aller sur la squad
+        failureStage = 'préparation/navigation-squad';
         await actor.page.goto(`/squad/${squad.id}`);
         const squadHeading = actor.page.getByRole('heading', { name: squadName, exact: true });
+        failureStage = 'préparation/titre-squad';
         await expect(squadHeading).toBeVisible({ timeout: 15_000 });
         // GPS réel du navigateur local ; aucune mutation du store applicatif.
+        failureStage = 'préparation/focus-squad';
         await squadHeading.click();
-        await waitForCurrentScene(actor.page);
+        await waitForCurrentScene(actor.page, stage => { failureStage = stage; });
 
         // Attendre que le marqueur joueur « Créer un Beer Call » soit actif (position GPS fixée)
         const createButton = actor.page.getByRole('button', { name: 'Créer un Beer Call', exact: true });
+        failureStage = 'préparation/bouton-création';
         await expect(createButton).toBeVisible({ timeout: 15_000 });
 
         // Préparer le fichier photo
+        failureStage = 'préparation/ouverture-sélecteur-photo';
         const fileChooserPromise = actor.page.waitForEvent('filechooser');
         await createButton.click();
         const fileChooser = await fileChooserPromise;
+        failureStage = 'préparation/sélection-photo';
         await fileChooser.setFiles({
           name: photo.name,
           mimeType: photo.mimeType,
@@ -553,13 +564,17 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
         });
 
         const locationName = `Bar ${unique()}`;
+        failureStage = 'préparation/saisie-lieu';
         await actor.page.getByPlaceholder('Ex: Bar Le Central...').fill(locationName);
 
         const modal = actor.page.getByRole('heading', { name: "Valider l'Apéro", exact: true });
+        failureStage = 'préparation/modale-visible';
         await expect(modal).toBeVisible();
+        failureStage = 'préparation/absence-erreur';
         await expect(actor.page.getByText('Alerte Fraude 🚨', { exact: true })).toHaveCount(0);
         await expect(actor.page.getByText('Une erreur technique est survenue.', { exact: true })).toHaveCount(0);
         const submit = actor.page.getByRole('button', { name: "LANCER L'APPEL", exact: true });
+        failureStage = 'préparation/soumission-disponible';
         await expect(submit).toBeEnabled();
         observer = observeJob(actor.page, squad.id);
         failureStage = 'request/202';
