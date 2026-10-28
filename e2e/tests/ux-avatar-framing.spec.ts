@@ -56,6 +56,7 @@ export type Sample = {
   calls: number;
   frame: number;
   elapsed: number;
+  frameloop?: string;
 };
 
 // Observation du renderer via le hook global DevTools standard sans fortes références
@@ -78,6 +79,7 @@ async function observeRenderer(page: Page) {
       __r3f?: { root: { getState(): State } };
     };
     type State = {
+      frameloop: string;
       gl: { domElement: HTMLCanvasElement; info: { render: { calls: number; frame: number } } };
       camera: { position: Vector; matrixWorldInverse: { toArray(): number[] }; projectionMatrix: { toArray(): number[] } };
       clock: { elapsedTime: number };
@@ -211,6 +213,7 @@ async function observeRenderer(page: Page) {
         projection: state.camera.projectionMatrix.toArray(),
         ...state.gl.info.render,
         elapsed: state.clock.elapsedTime,
+        frameloop: state.frameloop,
       };
     };
   });
@@ -257,6 +260,25 @@ async function setupHarness(context: BrowserContext, page: Page, initialFriends?
   const models = await getCachedModels();
   const hits = new Set<string>();
   const failures: string[] = [];
+  const preparedMode = process.env.BEERCALL_PREPARED_THUMBNAILS === '1';
+  const preparedModels = new Map<string, { name: string; buffer: Buffer }>();
+  const preparedManifest: { version: number; threeRevision: string; models: Record<string, { file: string; sha256: string; bytes: number; sourceSha256: string }> } = {
+    version: 1, threeRevision: '183', models: {},
+  };
+  if (preparedMode) {
+    const root = resolve(process.env.BEERCALL_WORKSPACE_BACKEND!, 'static/models/prepared');
+    const manifest = JSON.parse(await readFile(resolve(root, 'manifest.json'), 'utf8')) as typeof preparedManifest;
+    for (const [name, hash] of Object.entries(HASHES)) {
+      const entry = manifest.models[`${name}.fbx`];
+      expect(entry.sourceSha256, 'prepared asset matches the unchanged FBX fixture').toBe(hash);
+      const file = resolve(root, entry.file);
+      expect(relative(root, file).startsWith('..') || isAbsolute(relative(root, file))).toBe(false);
+      const buffer = await readFile(file);
+      expect(createHash('sha256').update(buffer).digest('hex')).toBe(entry.sha256);
+      preparedManifest.models[`${name}.fbx`] = entry;
+      preparedModels.set(entry.file, { name: `${name}.fbx`, buffer });
+    }
+  }
 
   let currentFriends = initialFriends ?? Array.from({ length: 30 }, (_, i) => ({
     id: String(i + 1),
@@ -299,7 +321,16 @@ async function setupHarness(context: BrowserContext, page: Page, initialFriends?
   await context.route('**/models/**', async (route: any) => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/models/prepared/manifest.json') {
-      return route.fulfill({ json: { version: 1, threeRevision: '183', models: {} } });
+      return route.fulfill({ json: preparedManifest });
+    }
+    if (preparedMode && path.startsWith('/models/prepared/')) {
+      const model = preparedModels.get(path.slice('/models/prepared/'.length));
+      if (!model || route.request().method() !== 'GET') {
+        failures.push(path);
+        return route.abort();
+      }
+      hits.add(model.name);
+      return route.fulfill({ contentType: 'application/octet-stream', body: model.buffer });
     }
     const name = decodeURIComponent(path.slice('/models/'.length));
     const buffer = models.get(name);
@@ -454,6 +485,95 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
     expect(() => assertCameraStability(validSample, shifted)).toThrow(/pompage/);
   });
 
+  test('mesure navigation vers les premières miniatures réellement soumises', async ({ context, page }, info) => {
+    await setupHarness(context, page, [1, 2].map(id => ({
+      id: String(id), username: `Cadre${id}`, caps: 123, score: 456, title: 'Pilier', avatar: MEN,
+    })));
+    await page.addInitScript(() => {
+      const timings = { started: 0, ready: [] as { id: string; ms: number }[] };
+      Object.assign(window, { __thumbnailTimings: timings });
+      document.addEventListener('click', event => {
+        const button = (event.target as Element).closest('button');
+        if (button?.textContent?.trim() === 'Connexions') timings.started = performance.now();
+      }, true);
+      new MutationObserver(() => {
+        if (!timings.started) return;
+        for (const avatar of document.querySelectorAll('[data-testid^="avatar-thumb-"]')) {
+          const id = avatar.getAttribute('data-testid')!;
+          if (avatar.querySelector('[data-avatar-framing="ready"]') && !timings.ready.some(item => item.id === id)) {
+            timings.ready.push({ id, ms: performance.now() - timings.started });
+          }
+        }
+      }).observe(document, { subtree: true, attributes: true, childList: true });
+    });
+    await openConnexionsPage(page);
+    for (const id of [1, 2]) await readSample(page, id);
+    const timings = await page.evaluate(() => Reflect.get(window, '__thumbnailTimings') as { started: number; ready: { id: string; ms: number }[] });
+    expect(timings.started).toBeGreaterThan(0);
+    expect(timings.ready).toHaveLength(2);
+    await info.attach('navigation-to-submitted-thumbnails', { body: JSON.stringify({
+      prepared: process.env.BEERCALL_PREPARED_THUMBNAILS === '1', ...timings,
+      limitation: 'Local desktop Chromium, not iPhone. Includes query, module, WebGL and real frame submission.',
+    }), contentType: 'application/json' });
+    console.log(JSON.stringify({ thumbnailNavigationTimings: timings }));
+    await teardownObserver(page);
+  });
+
+  test('miniatures préparées en pause : révélation sans recréer les Canvas', async ({ context, page }, info) => {
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await setupHarness(context, page, [1, 2].map(id => ({
+        id: String(id), username: `Cadre${id}`, caps: 123, score: 456, title: 'Pilier', avatar: MEN,
+      })));
+      await page.goto('/squad/900001');
+      const retained = page.getByTestId('retained-connections');
+      await expect(retained).toHaveAttribute('aria-hidden', 'true');
+      await expect.poll(async () => page.locator('[data-testid^="avatar-thumb-"] canvas').evaluateAll(canvases => {
+        const reader = Reflect.get(window, '__readFraming') as (canvas: Element) => Sample | null;
+        return canvases.length === 2 && canvases.every(canvas => {
+          const sample = reader(canvas);
+          return sample && sample.calls > 0 && sample.frameloop === 'never';
+        });
+      }), { timeout: 45_000, message: 'Deux vrais buffers préparés, puis frameloops arrêtées hors route' }).toBe(true);
+      const canvases = await page.locator('[data-testid^="avatar-thumb-"] canvas').elementHandles();
+      await page.evaluate(() => {
+        document.addEventListener('click', event => {
+          if ((event.target as Element).closest('button')?.textContent?.trim() === 'Connexions') performance.mark('thumbnail-open');
+        }, true);
+        const retained = document.querySelector('[data-testid="retained-connections"]')!;
+        new MutationObserver(() => {
+          if (retained.getAttribute('aria-hidden') === 'false') performance.mark('thumbnail-revealed');
+        }).observe(retained, { attributes: true, attributeFilter: ['aria-hidden'] });
+      });
+      await page.getByRole('button', { name: 'Connexions', exact: true }).click();
+      await expect(retained).toHaveAttribute('aria-hidden', 'false');
+      for (const canvas of canvases) expect(await canvas.evaluate(node => node.isConnected)).toBe(true);
+      const elapsed = await page.evaluate(() => performance.measure('thumbnail-reveal', 'thumbnail-open', 'thumbnail-revealed').duration);
+      console.log(JSON.stringify({ preparedRevealMs: elapsed }));
+      const revealSamples = [elapsed];
+      for (const id of [1, 2]) {
+        const sample = await readSample(page, id);
+        const box = (await page.getByTestId(`avatar-thumb-${id}`).locator('canvas').boundingBox())!;
+        assertFramed(sample, MEN, box.width, box.height);
+      }
+      await page.screenshot({ path: info.outputPath('prepared-first-opening.png') });
+      await page.locator('header button').first().click();
+      for (const canvas of canvases) expect(await canvas.evaluate(node => node.isConnected)).toBe(true);
+      for (let run = 1; run < 10; run++) {
+        await page.getByRole('button', { name: 'Connexions', exact: true }).click();
+        await expect(retained).toHaveAttribute('aria-hidden', 'false');
+        revealSamples.push(await page.evaluate(() => performance.measure('thumbnail-reveal', 'thumbnail-open', 'thumbnail-revealed').duration));
+        for (const canvas of canvases) expect(await canvas.evaluate(node => node.isConnected)).toBe(true);
+        await page.locator('header button').first().click();
+      }
+      console.log(JSON.stringify({ preparedRevealSamplesMs: revealSamples }));
+      await info.attach('prepared-reveal', { body: JSON.stringify({ samplesMs: revealSamples,
+        scope: 'cached canvas reveal, not cold loading or physical iPhone display' }), contentType: 'application/json' });
+    } finally {
+      await teardownObserver(page);
+    }
+  });
+
   const OUTFIT_CASES = [
     { index: 0, id: 6, label: 'Men de base (Worker)', config: MEN },
     { index: 1, id: 7, label: 'Men + Kart 3000', config: MEN_KART },
@@ -472,6 +592,15 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
         const first = await readSample(page, outfit.id);
         const canvas = page.getByTestId(`avatar-thumb-${outfit.id}`).locator('canvas');
         const rect = (await canvas.boundingBox())!;
+
+        if (process.env.BEERCALL_PREPARED_THUMBNAILS === '1') {
+          const framingInfo = JSON.parse((await page.getByTestId(`avatar-thumb-${outfit.id}`)
+            .locator('[data-avatar-framing-info]').getAttribute('data-avatar-framing-info'))!) as { cpuTimeMs: number; sampleCount: number };
+          expect(framingInfo.sampleCount, 'offline bounds retain the full Idle sampling contract').toBeGreaterThanOrEqual(240);
+          expect(framingInfo.cpuTimeMs, 'prepared framing CPU budget, not end-to-end iPhone latency').toBeLessThan(20);
+          console.log(JSON.stringify({ outfit: outfit.label, framingInfo }));
+          await info.attach('prepared-framing-budget', { body: JSON.stringify(framingInfo), contentType: 'application/json' });
+        }
 
         // 1. Assert initial framing
         assertFramed(first, outfit.config, rect.width, rect.height);

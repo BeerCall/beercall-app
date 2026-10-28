@@ -265,6 +265,9 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
           return json(profile);
         }
         if (path === '/api/squads') return json(squads);
+        // Connexions now prepares its first thumbnails after map interactivity.
+        // Specific tests override this read above; other UX fixtures have no friends.
+        if (path === '/api/auth/connections') return json([]);
         if (/^\/api\/squads\/\d+$/.test(path)) {
           const id = Number(path.split('/').at(-1));
           const squad = squads.find(s => s.id === id);
