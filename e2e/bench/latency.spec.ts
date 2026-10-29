@@ -496,12 +496,19 @@ async function registerActor(browser: Browser): Promise<Actor> {
       Object.assign(window, { __latencySceneHistory: history });
       for (const name of ['beercall:scene-metric', 'beercall:scene-invalidate']) {
         window.addEventListener(name, event => {
-          const detail = (event as CustomEvent<{ kind?: string; view?: string; generation?: number; timestamp?: number; drawCalls?: number }>).detail;
+          const detail = (event as CustomEvent<{ kind?: string; view?: string; instanceId?: string; generation?: number; timestamp?: number; drawCalls?: number }>).detail;
           history.push({ event: name, kind: ['mapInteractive', 'avatarFrameSubmitted', 'sceneUsable', 'worldFrameSubmitted'].includes(detail.kind ?? '') ? detail.kind : null,
+            role: detail.instanceId?.startsWith('map:') ? 'map' : detail.instanceId?.startsWith('avatar:') ? 'avatar' : 'other',
             dashboard: detail.view === 'dashboard', generation: Number.isSafeInteger(detail.generation) ? detail.generation : null,
             timestamp: Number.isFinite(detail.timestamp) ? detail.timestamp : null, drawCalls: Number.isFinite(detail.drawCalls) ? detail.drawCalls : null });
           if (history.length > 50) history.shift();
         });
+      }
+      for (const name of ['webglcontextlost', 'webglcontextrestored', 'visibilitychange']) {
+        document.addEventListener(name, event => {
+          history.push({ event: name, hidden: document.hidden, map: event.target instanceof HTMLCanvasElement && event.target.classList.contains('maplibregl-canvas') });
+          if (history.length > 50) history.shift();
+        }, true);
       }
     });
     await page.goto('/login');
@@ -647,7 +654,11 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
                 timestamp: Number.isFinite(signal.timestamp) ? signal.timestamp : null,
                 drawCalls: Number.isFinite(signal.drawCalls) ? signal.drawCalls : null } : null];
             }));
-            return { hidden: document.hidden, signals, history: w.__latencySceneHistory ?? [] };
+            const canvases = Array.from(document.querySelectorAll('canvas')).map(canvas => ({
+              map: canvas.classList.contains('maplibregl-canvas'), width: canvas.width, height: canvas.height,
+              contextLost: (canvas.getContext('webgl2') ?? canvas.getContext('webgl'))?.isContextLost() ?? null,
+            }));
+            return { hidden: document.hidden, signals, canvases, history: w.__latencySceneHistory ?? [] };
           });
           failureDiagnostics = { ...scene, cartoFailures: actor.cartoFailures };
         } catch { /* Diagnostic best-effort, never replaces the original failure. */ }
