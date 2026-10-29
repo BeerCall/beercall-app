@@ -1,7 +1,13 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { installUxFixtures, makeSquads } from './support/uxFixtures';
 
-test.use({ viewport: { width: 390, height: 844 }, trace: 'off' });
+test.use({ viewport: { width: 390, height: 844 }, trace: 'off', timezoneId: 'Europe/Paris' });
+
+// Heure de référence déterministe : les contrats de contraste jour ne doivent
+// pas dépendre de l'heure réelle de la machine (nuit après 19h).
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-11-15T11:00:00Z'));
+});
 
 async function measurePair(locator: Locator, label: string, allowComposite = false) {
   await expect(locator, `Paire présente : ${label}`).toBeVisible();
@@ -83,16 +89,73 @@ for (const color of ['#F59E0B', '#EF4444', '#10B981', '#3B82F6', '#8B5CF6', '#EC
     const isolation = await installUxFixtures(context, { squads });
     await page.goto('/squad/900001');
     const heading = page.getByRole('heading', { name: squads[0].name, exact: true });
-    const pair = await measurePair(heading, `Titre ${color}`);
-    expect(pair.foreground.slice(0, 3)).toEqual([16, 24, 40]);
-    expect(pair.background.slice(0, 3)).toEqual([255, 255, 255]);
     const rgb = [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16));
     await expect(heading).toHaveCSS('font-size', '20px');
+    await expect(heading).toHaveCSS('color', `rgb(${rgb.join(', ')})`);
     await expect(heading.locator('xpath=../..'), 'Couleur API exacte après la transition CSS')
       .toHaveCSS('border-top-color', `rgba(${rgb.join(', ')}, 0.25)`);
+    await expect(heading.locator('xpath=../..')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+    // Deuxième rangée du badge : le code d'invitation reste lisible dans sa pilule grise.
+    const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
+    const codePair = await measurePair(code.locator('span').first(), `Code invitation ${color}`);
+    expect(codePair.foreground.slice(0, 3)).toEqual([54, 65, 83]);
+    expect(codePair.background.slice(0, 3)).toEqual([243, 244, 246]);
     isolation.assertIsolated();
   });
 }
+
+test('badge jour : deux rangées distinctes et code d invitation copiable', async ({ context, page }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const squads = makeSquads(1);
+  const isolation = await installUxFixtures(context, { squads });
+  await page.goto('/squad/900001');
+
+  const heading = page.getByRole('heading', { name: squads[0].name, exact: true });
+  const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
+  await expect(heading).toBeVisible();
+  await expect(code).toBeVisible();
+
+  const headingBox = await heading.boundingBox();
+  const codeBox = await code.boundingBox();
+  expect(headingBox, 'Titre mesurable').not.toBeNull();
+  expect(codeBox, 'Code mesurable').not.toBeNull();
+  expect(codeBox!.y, 'Code sur la seconde rangée').toBeGreaterThanOrEqual(headingBox!.y + headingBox!.height - 1);
+  expect(codeBox!.height, 'Pilule de copie compacte').toBeGreaterThanOrEqual(24);
+
+  await code.tap();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(squads[0].invite_code);
+  isolation.assertIsolated();
+});
+
+test.describe('Badge haut opaque : jour et nuit', () => {
+  test.use({ timezoneId: 'Europe/Paris' });
+  for (const theme of [
+    { label: 'jour', time: '2026-11-15T11:00:00Z', hour: 12 },
+    { label: 'nuit', time: '2026-11-15T21:00:00Z', hour: 22 },
+  ]) {
+    test(`deux rangées lisibles et opaques à ${theme.hour}h`, async ({ context, page }) => {
+      const squads = makeSquads(1);
+      const isolation = await installUxFixtures(context, { squads });
+      await page.clock.install({ time: new Date(theme.time) });
+      await page.goto('/squad/900001');
+      expect(await page.evaluate(() => new Date().getHours())).toBe(theme.hour);
+
+      const identity = page.locator('[data-dashboard-identity]');
+      const heading = page.getByRole('heading', { name: squads[0].name, exact: true });
+      const code = page.getByRole('button', { name: squads[0].invite_code, exact: true });
+      await expect(identity).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+      const codePair = await measurePair(code.locator('span').first(), `Badge ${theme.label} code`);
+      expect(codePair.foreground.slice(0, 3)).toEqual([54, 65, 83]);
+      expect(codePair.background.slice(0, 3)).toEqual([243, 244, 246]);
+
+      const headingBox = await heading.boundingBox();
+      const codeBox = await code.boundingBox();
+      expect(codeBox!.y).toBeGreaterThanOrEqual(headingBox!.y + headingBox!.height - 1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      isolation.assertIsolated();
+    });
+  }
+});
 
 test('labels de création sur fond blanc', async ({ context, page }) => {
   const isolation = await installUxFixtures(context);

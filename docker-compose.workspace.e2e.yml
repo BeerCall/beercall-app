@@ -1,0 +1,32 @@
+name: beercall-e2e
+
+x-workspace-backend-build: &workspace_backend_build
+  context: ../beercall-backend
+  args:
+    PYTHON_IMAGE: ${BEERCALL_E2E_PYTHON_IMAGE:-python:3.13-slim}
+
+services:
+  migrate_e2e:
+    build: *workspace_backend_build
+
+  uploads_init_e2e:
+    build: *workspace_backend_build
+
+  backend_e2e:
+    build: *workspace_backend_build
+
+  beer_worker_e2e:
+    build: *workspace_backend_build
+
+  beer_worker_e2e_2:
+    build: *workspace_backend_build
+
+  daily_worker_e2e:
+    build: *workspace_backend_build
+
+  frontend_e2e:
+    build:
+      context: ../beercall-frontend
+      args:
+        NODE_IMAGE: ${BEERCALL_E2E_NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${BEERCALL_E2E_NGINX_IMAGE:-nginx:stable-alpine}

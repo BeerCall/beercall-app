@@ -1,0 +1,14 @@
+name: beercall-e2e
+
+services:
+  backend_e2e:
+    environment:
+      - PHOTO_DETECTOR_MODE=yolo
+
+  beer_worker_e2e:
+    environment:
+      - PHOTO_DETECTOR_MODE=yolo
+
+  beer_worker_e2e_2:
+    environment:
+      - PHOTO_DETECTOR_MODE=yolo

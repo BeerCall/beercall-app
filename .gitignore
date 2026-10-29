@@ -9,4 +9,6 @@ beercall_dump.sql
 e2e/node_modules/
 e2e/test-results/
 e2e/playwright-report/
+test-results/
+playwright-report/
 e2e-compose.log

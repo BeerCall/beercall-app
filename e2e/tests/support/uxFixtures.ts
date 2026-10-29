@@ -153,12 +153,14 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
   } | undefined;
 
   if (options.assets) {
-    const backendFbx = resolve(process.cwd(), '../beercall-backend/static/models/Animations.fbx');
+    const backendRoot = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
+    const backendFbx = resolve(backendRoot, 'static/models/Animations.fbx');
     animations = await readFile(backendFbx);
     fbxHash = createHash('sha256').update(animations).digest('hex');
     expect(fbxHash, 'FBX local vérifié, sans téléchargement').toBe(ANIMATIONS_SHA256);
 
-    const animDir = resolve(process.cwd(), '../beercall-frontend/public/animations');
+    const frontendRoot = process.env.BEERCALL_WORKSPACE_FRONTEND ?? resolve(process.cwd(), '../beercall-frontend');
+    const animDir = resolve(frontendRoot, 'public/animations');
     manifestBuffer = await readFile(resolve(animDir, 'manifest.json'));
     manifestHash = createHash('sha256').update(manifestBuffer).digest('hex');
     manifest = JSON.parse(manifestBuffer.toString('utf8'));
@@ -218,6 +220,11 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
       return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: hdr });
     }
     if (path.startsWith('/models/')) {
+      if (['/models/Bar.fbx', '/models/Swimming_pool.fbx', '/models/Floaty_Island.fbx'].includes(path) && method === 'GET') {
+        // Most UX tests deliberately have no decor assets. Exercise the optional
+        // warm-up failure path; world-specific tests override these three routes.
+        return route.fulfill({ status: 503, body: 'Static world assets unavailable in this fixture' });
+      }
       if (path === '/models/Animations.fbx' && animations && method === 'GET') {
         rawFbxHits++;
         return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: animations });
@@ -263,6 +270,9 @@ export async function installUxFixtures(context: BrowserContext, options: UxOpti
           return json(profile);
         }
         if (path === '/api/squads') return json(squads);
+        // Connexions now prepares its first thumbnails after map interactivity.
+        // Specific tests override this read above; other UX fixtures have no friends.
+        if (path === '/api/auth/connections') return json([]);
         if (/^\/api\/squads\/\d+$/.test(path)) {
           const id = Number(path.split('/').at(-1));
           const squad = squads.find(s => s.id === id);

@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { installUxFixtures, makeSquads } from './support/uxFixtures';
 
@@ -21,6 +22,20 @@ async function assertWheelGeometry(wheel: Locator) {
     const rect = (el: Element) => el.getBoundingClientRect();
     const intersection = (a: DOMRect, b: DOMRect) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) *
       Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    // CSS Color 4 peut sérialiser la même couleur en oklch, rgb ou color().
+    // Comparer les pixels sRGB opaques, pas ces écritures ; aucune tolérance de palette.
+    const swatch = document.createElement('canvas');
+    swatch.width = swatch.height = 1;
+    const colorContext = swatch.getContext('2d', { willReadFrequently: true });
+    if (!colorContext) throw new Error('Normalisation sRGB indisponible');
+    const srgb = (color: string) => {
+      if (!CSS.supports('color', color)) throw new Error(`Couleur CSS invalide : ${color}`);
+      colorContext.clearRect(0, 0, 1, 1);
+      colorContext.fillStyle = color;
+      colorContext.fillRect(0, 0, 1, 1);
+      return [...colorContext.getImageData(0, 0, 1, 1).data].join(',');
+    };
+    const allowedColors = ['rgb(16, 24, 40)', 'rgb(251, 191, 36)'].map(srgb);
     for (const el of [...buttons, ...labels]) {
       const r = rect(el);
       if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight ||
@@ -31,6 +46,21 @@ async function assertWheelGeometry(wheel: Locator) {
       if (!button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))) issues.push(`Bouton masqué : ${button.getAttribute('aria-label')}`);
     }
     labels.forEach((label, i) => {
+      if (label.scrollWidth > Math.ceil(label.clientWidth) + 1) {
+        issues.push(`ScrollWidth caché dans label : ${label.textContent}`);
+      }
+      const style = getComputedStyle(label);
+      // Nouvelle direction v5.2 : plus aucun fond opaque blanc, la lisibilité vient
+      // de la couleur calculée et de l'ombre, pas d'un rectangle.
+      if (style.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+        issues.push(`Fond non transparent sur label : ${label.textContent} (${style.backgroundColor})`);
+      }
+      if (!allowedColors.includes(srgb(style.color))) {
+        issues.push(`Couleur de label désynchronisée du badge : ${label.textContent} (${style.color})`);
+      }
+      if (style.textShadow === 'none' && style.filter === 'none') {
+        issues.push(`Halo/ombre manquant sur label : ${label.textContent}`);
+      }
       for (const other of [...labels.slice(i + 1), ...buttons, ...zones]) {
         if (intersection(rect(label), rect(other)) > 0) issues.push(`Collision du label : ${label.textContent}`);
       }
@@ -40,13 +70,37 @@ async function assertWheelGeometry(wheel: Locator) {
       const r = rect(counter);
       if (!counter.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))) issues.push(`Compteur de page masqué : ${counter.textContent}`);
     }
+    const bar = region.nextElementSibling;
+    if (bar) {
+      const barRect = bar.getBoundingClientRect();
+      const gapWheelBar = Math.abs(barRect.top - band.bottom);
+      if (gapWheelBar > 1) issues.push(`Gap roue/barre anormal : ${gapWheelBar.toFixed(1)} px (attendu 0 px ±1)`);
+    }
+    const timeline = region.parentElement?.previousElementSibling;
+    if (timeline && timeline.clientHeight > 0) {
+      const timelineRect = timeline.getBoundingClientRect();
+      const gapCardsWheel = Math.abs(band.top - timelineRect.bottom - 4);
+      if (gapCardsWheel > 1) issues.push(`Gap cartes/roue anormal : ${(band.top - timelineRect.bottom).toFixed(1)} px (attendu 4 px ±1)`);
+    }
     if (document.documentElement.scrollWidth > innerWidth) issues.push('Overflow horizontal document');
     return issues;
   }), 'Géométrie au repos : boutons, labels et compteur réellement visibles').toEqual([]);
 }
 
+test('contrôle négatif : une mauvaise couleur de label est refusée après normalisation sRGB', async ({ context, page }) => {
+  const isolation = await installUxFixtures(context, { squads: makeSquads(0) });
+  await page.goto('/dashboard');
+  const wheel = page.getByRole('region', { name: 'Navigation des squads' });
+  await assertWheelGeometry(wheel);
+  await wheel.locator('[data-wheel-label]').first().evaluate(label => {
+    (label as HTMLElement).style.color = 'rgb(255, 0, 0)';
+  });
+  await expect(assertWheelGeometry(wheel)).rejects.toThrow(/Couleur de label désynchronisée/);
+  isolation.assertIsolated();
+});
+
 for (const viewport of viewports) {
-  for (const count of [0, 1, 3, 8, 12]) {
+  for (const count of [0, 1, 3, 4, 8, 12]) {
     const pageCount = Math.max(1, Math.ceil(count / 3));
     for (let index = 0; index < pageCount; index++) {
       test(`géométrie ${count} squads ${viewport.width}×${viewport.height} page ${index + 1} et Créer`, async ({ context, page }) => {
@@ -83,8 +137,16 @@ for (const viewport of viewports) {
 }
 
 async function touchSwipe(page: Page, direction: 'next' | 'previous') {
+  const dragLocator = page.locator('[data-wheel-drag], div.top-\\[28px\\]\\.h-\\[288px\\], div.top-\\[36px\\]\\.h-\\[288px\\]').first();
+  await expect(dragLocator).toBeVisible();
   const wheel = await page.getByRole('region', { name: 'Navigation des squads' }).boundingBox();
   expect(wheel).not.toBeNull();
+  const box = await dragLocator.boundingBox();
+  expect(box).not.toBeNull();
+
+  // Attendre la stabilisation avant de démarrer le contact
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+
   const cdp = await page.context().newCDPSession(page);
   const start = wheel!.x + wheel!.width / 2 + (direction === 'next' ? 60 : -60);
   const y = wheel!.y + 100;
@@ -102,6 +164,7 @@ async function touchSwipe(page: Page, direction: 'next' | 'previous') {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start + (direction === 'next' ? -120 : 120), y, id: 1 }] });
     } while (performance.now() < settleUntil);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
   } finally { await cdp.detach(); }
 }
 
@@ -193,6 +256,146 @@ for (const viewport of viewports) {
     await page.goto('/squad/900001');
     await page.getByRole('button', { name: /Répondre/ }).tap();
     await expect(page.getByRole('heading', { name: 'Appel aux armes !' })).toBeVisible();
+    isolation.assertIsolated();
+  });
+}
+
+test('rendering complet du mot de 120 caractères et des initiales longues sans troncature ni scrollWidth caché', async ({ context, page }) => {
+  const squads = makeSquads(3);
+  const isolation = await installUxFixtures(context, { squads });
+  await page.goto('/squad/900001');
+  const wheel = page.getByRole('region', { name: 'Navigation des squads' });
+  await expect(wheel).toBeVisible();
+
+  // Mot long de 120 caractères
+  const longWord = 'S'.repeat(120);
+  const longLabel = wheel.locator('[data-wheel-label][data-squad-id="900003"]');
+  await expect(longLabel).toBeVisible();
+  await expect(longLabel).toHaveText(longWord);
+
+  // Initiales longues d\'équipe multi-mots
+  const initialsLabel = wheel.locator('[data-wheel-label][data-squad-id="900001"]');
+  await expect(initialsLabel).toBeVisible();
+  await expect(initialsLabel).toHaveText('LADQ—ÉDV');
+
+  // Aucun scrollWidth caché
+  const scrollIssues = await wheel.evaluate(el => {
+    const labels = el.querySelectorAll<HTMLElement>('[data-wheel-label]');
+    const bad: string[] = [];
+    for (const l of labels) {
+      if (l.scrollWidth > Math.ceil(l.clientWidth) + 1) {
+        bad.push(`${l.textContent}: scrollWidth=${l.scrollWidth} > clientWidth=${l.clientWidth}`);
+      }
+    }
+    return bad;
+  });
+  expect(scrollIssues).toEqual([]);
+  isolation.assertIsolated();
+});
+
+test('gaps réels cartes/roue/barre et fond opaque en jour/nuit avec captures', async ({ context, page }) => {
+  const squads = makeSquads(3);
+  const isolation = await installUxFixtures(context, { squads });
+  const resultsDir = process.env.BEERCALL_USAGE_RESULTS ?? resolve(__dirname, '../../../temp/usage-results');
+
+  // 1. Thème Jour (14h)
+  await page.clock.install({ time: new Date('2026-10-25T14:00:00') });
+  await page.goto('/squad/900001');
+  const wheel = page.getByRole('region', { name: 'Navigation des squads' });
+  await expect(wheel).toBeVisible();
+  await assertWheelGeometry(wheel);
+  const dayLabel = await wheel.locator('[data-wheel-label]').first().evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      decorated: style.textShadow !== 'none' || style.filter !== 'none',
+    };
+  });
+  await expect(page.locator('[data-dashboard-identity]')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  const dayIdentityColor = await page.locator('[data-dashboard-identity]').evaluate(el => getComputedStyle(el).color);
+  expect(dayLabel.color, 'label jour en gray-900').toBe(dayIdentityColor);
+  await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-gray-900/);
+  expect(dayLabel.background, 'aucun rectangle opaque de jour').toBe('rgba(0, 0, 0, 0)');
+  expect(dayLabel.decorated, 'halo clair de jour').toBe(true);
+
+  // Mesurer cartes/roue=4 px ±1 et roue/barre=0 px
+  const gaps = await wheel.evaluate(el => {
+    const band = el.getBoundingClientRect();
+    const bar = el.nextElementSibling;
+    const barRect = bar ? bar.getBoundingClientRect() : null;
+    const timeline = el.parentElement?.previousElementSibling;
+    const timelineRect = timeline ? timeline.getBoundingClientRect() : null;
+    return {
+      cardsWheelGap: timelineRect ? band.top - timelineRect.bottom : null,
+      wheelBarGap: barRect ? barRect.top - band.bottom : null,
+    };
+  });
+  expect(gaps.cardsWheelGap).not.toBeNull();
+  expect(Math.abs(gaps.cardsWheelGap! - 4)).toBeLessThanOrEqual(1);
+  expect(gaps.wheelBarGap).not.toBeNull();
+  expect(Math.abs(gaps.wheelBarGap!)).toBeLessThanOrEqual(1);
+
+  // Capture jour
+  await page.screenshot({ path: resolve(resultsDir, 'wheel-day.png') });
+
+  // 2. Thème Nuit (23h)
+  await page.clock.setFixedTime(new Date('2026-10-25T23:00:00'));
+  await page.reload();
+  await expect(wheel).toBeVisible();
+  await assertWheelGeometry(wheel);
+  const nightLabel = await wheel.locator('[data-wheel-label]').first().evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      decorated: style.textShadow !== 'none' || style.filter !== 'none',
+    };
+  });
+  await expect( page.locator('[data-dashboard-identity]') ).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(wheel.locator('[data-wheel-label]').first()).toHaveClass(/text-beer-light/);
+  expect(nightLabel.color, 'label nuit en beer-light (#FBBF24)').toBe('rgb(251, 191, 36)');
+  expect(nightLabel.background, 'aucun rectangle opaque de nuit').toBe('rgba(0, 0, 0, 0)');
+  expect(nightLabel.decorated, 'ombre sombre de nuit').toBe(true);
+
+  // Capture nuit
+  await page.screenshot({ path: resolve(resultsDir, 'wheel-night.png') });
+  isolation.assertIsolated();
+});
+
+for (const count of [0, 1, 3, 4, 12]) {
+  test(`cas ${count} squads : pagination et retour sur page active`, async ({ context, page }) => {
+    const squads = makeSquads(count);
+    const targetSquad = count > 0 ? squads[count - 1] : null;
+    const pageCount = Math.max(1, Math.ceil(count / 3));
+    const isolation = await installUxFixtures(context, { squads, currentSquadId: targetSquad?.id });
+
+    await page.goto(targetSquad ? `/squad/${targetSquad.id}` : '/dashboard');
+    const wheel = page.getByRole('region', { name: 'Navigation des squads' });
+    await expect(wheel).toBeVisible();
+
+    if (count > 0 && pageCount > 1) {
+      // Directement sur la page de la squad active
+      await expect(wheel.getByText(`Page ${pageCount}/${pageCount}`, { exact: true })).toBeVisible();
+      await expect(wheel.getByRole('button', { name: targetSquad!.name, exact: true })).toBeVisible();
+
+      // Naviguer vers la première page
+      for (let p = pageCount; p > 1; p--) {
+        await wheel.getByRole('button', { name: 'Page précédente' }).tap();
+      }
+      await expect(wheel.getByText(`Page 1/${pageCount}`, { exact: true })).toBeVisible();
+
+      // Retour sur la page active par navigation
+      await page.goto(`/squad/${targetSquad!.id}`);
+      await expect(wheel.getByText(`Page ${pageCount}/${pageCount}`, { exact: true })).toBeVisible();
+      await expect(wheel.getByRole('button', { name: targetSquad!.name, exact: true })).toBeVisible();
+    } else if (count > 0) {
+      await expect(wheel.getByRole('button', { name: targetSquad!.name, exact: true })).toBeVisible();
+    } else {
+      await expect(wheel.getByRole('button', { name: 'Créer', exact: true })).toBeVisible();
+      await expect(wheel.getByRole('button', { name: 'Rejoindre', exact: true })).toBeVisible();
+    }
+    await assertWheelGeometry(wheel);
     isolation.assertIsolated();
   });
 }

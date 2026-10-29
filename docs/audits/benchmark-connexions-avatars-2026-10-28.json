@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-28",
+  "platform": "win32",
+  "node": "v24.18.1",
+  "os": "10.0.19045",
+  "cpu": "Intel(R) Core(TM) i7-6500U CPU @ 2.50GHz",
+  "cpuBenchmark": {
+    "scope": "Framing CPU only, real decoded Men Worker models in initial Idle pose; no network or GPU",
+    "warmupDiscardedPerVariant": 1,
+    "order": "alternating runtime/prepared on successive iterations",
+    "runtimeSamplesMs": [2529.3733,2636.3848,2617.7749000000003,3177.4184999999998,2603.201299999999,2461.0982000000004,2519.8973000000005,2439.818800000001,2609.3731000000007,2479.9771],
+    "preparedSamplesMs": [0.22620000000006257,0.25860000000011496,0.1297999999987951,0.11260000000038417,0.1665000000029977,0.11990000000150758,0.1242000000020198,0.08880000000135624,1.4150000000008731,0.15579999999681604],
+    "runtime": {"n":10,"median":2566.2872999999995,"p95":3177.4184999999998,"p99":3177.4184999999998,"min":2439.818800000001,"max":3177.4184999999998,"stddev":201.3354213251956},
+    "prepared": {"n":10,"median":0.14279999999780557,"p95":1.4150000000008731,"p99":1.4150000000008731,"min":0.08880000000135624,"max":1.4150000000008731,"stddev":0.3816975902466095}
+  },
+  "browser": {
+    "scope": "Desktop Chromium at 390x844, cached Canvas reveal from click to visible route commit; NOT physical iPhone display",
+    "preparedRevealSamplesMs": [17.399999976158142,20.80000001192093,21.899999976158142,21.5,20.899999976158142,21,13.899999976158142,14,17.400000035762787,14.399999976158142],
+    "medianMs": 19.1,
+    "p95Ms": 21.9,
+    "p99Ms": 21.9,
+    "stddevMs": 3.1333,
+    "firstPreparedRevealMs": 17.399999976158142,
+    "earlyOpeningWithoutPreparation": {
+      "scope": "Single diagnostic observation at 1280x720, not a repeated cold benchmark",
+      "firstSubmittedThumbnailMs": 2015.4000000357628,
+      "secondSubmittedThumbnailMs": 2058.100000023842
+    }
+  },
+  "tests": {"unit":499,"unitFiles":62,"preparedFramingE2E":11,"mobileShellAndContrastE2E":27},
+  "limitations": ["No real iPhone measurement", "20 ms is not a cold network/WebGL guarantee", "Four texture-bearing FBX accessories retain runtime fallback", "No GPU memory, power or thermal benchmark"]
+}
