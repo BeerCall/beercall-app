@@ -768,14 +768,29 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
       await openConnexionsPage(page);
 
       // Scroll aux extrémités pour vérifier le budget de thumbnail
+      const modelSnapshots: { stage: string; hits: string[]; missing: string[] }[] = [];
+      const snapshotModels = (stage: string) => modelSnapshots.push({ stage, hits: [...harness.hits].sort(),
+        missing: Object.keys(HASHES).map(name => `${name}.fbx`).filter(name => !harness.hits.has(name)).sort() });
+      snapshotModels('connections-open');
+      // The two-slot renderer may recycle thumbnail 2 when scrolling straight to 3.
+      // Explicitly render its unique Kart before requiring the complete asset whitelist.
+      const kart = await readSample(page, 2);
+      const kartRect = (await page.getByTestId('avatar-thumb-2').locator('canvas').boundingBox())!;
+      assertFramed(kart, MEN_KART, kartRect.width, kartRect.height);
+      snapshotModels('thumb-2-kart-rendered');
       await page.getByTestId('avatar-thumb-3').evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
       await expect(page.getByTestId('avatar-thumb-3').locator('[data-avatar-framing="ready"]')).toBeVisible({ timeout: 45_000 });
+      snapshotModels('thumb-3-ready');
       await page.getByTestId('avatar-thumb-30').evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
       await expect(page.getByTestId('avatar-thumb-30').locator('[data-avatar-framing="ready"]')).toBeVisible({ timeout: 45_000 });
+      snapshotModels('thumb-30-ready');
 
       // Retour carte
       await page.locator('header button').first().click();
       await expect(page.locator('canvas[data-framing-map="retained"]')).toBeVisible();
+      snapshotModels('map-returned');
+      console.log(JSON.stringify({ navigationModels: modelSnapshots }));
+      await info.attach('navigation-models', { body: JSON.stringify({ snapshots: modelSnapshots, failures: harness.failures }), contentType: 'application/json' });
 
       // Vérifications finales : document unique, whitelist modèles, pas d'erreurs réseau
       expect(documents, 'aucun rechargement de document').toBe(1);
