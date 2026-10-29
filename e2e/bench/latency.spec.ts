@@ -442,7 +442,7 @@ async function waitForCurrentScene(page: Page, stage: (name: string) => void): P
   await expect(page.getByRole('button', { name: 'Créer un Beer Call', exact: true }).locator('canvas')).toBeVisible({ timeout: 30_000 });
   stage('préparation/scène/signaux-courants');
   await expect.poll(async () => {
-    const signals = await page.evaluate(() => (window as unknown as { __beercall_scene_metrics?: Record<string, SceneSignal> }).__beercall_scene_metrics ?? {});
+    const signals = await page.evaluate(() => (window as unknown as { __beercall_scene_metrics_by_view?: Record<string, Record<string, SceneSignal>> }).__beercall_scene_metrics_by_view?.dashboard ?? {});
     return currentScene(signals);
   }, { timeout: 30_000, message: 'Carte interactive et frame du joueur de la génération courante' }).toBe(true);
 }
@@ -646,9 +646,9 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
       if (actor) {
         try {
           const scene = await actor.page.evaluate(() => {
-            const w = window as unknown as { __beercall_scene_metrics?: Record<string, SceneSignal>; __latencySceneHistory?: unknown[] };
+            const w = window as unknown as { __beercall_scene_metrics_by_view?: Record<string, Record<string, SceneSignal>>; __latencySceneHistory?: unknown[] };
             const signals = Object.fromEntries(['mapInteractive', 'avatarFrameSubmitted', 'sceneUsable'].map(kind => {
-              const signal = w.__beercall_scene_metrics?.[kind];
+              const signal = w.__beercall_scene_metrics_by_view?.dashboard?.[kind];
               return [kind, signal ? { dashboard: signal.view === 'dashboard', hasInstance: Boolean(signal.instanceId),
                 generation: Number.isSafeInteger(signal.generation) ? signal.generation : null,
                 timestamp: Number.isFinite(signal.timestamp) ? signal.timestamp : null,
