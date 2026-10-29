@@ -278,6 +278,7 @@ interface Actor {
   page: Page;
   username: string;
   token: string;
+  cartoFailures: number[];
 }
 
 type Verdict = 'succeeded' | 'rejected' | 'failed';
@@ -453,6 +454,7 @@ async function registerActor(browser: Browser): Promise<Actor> {
     geolocation: { latitude: 48.8566, longitude: 2.3522 },
     permissions: ['geolocation'],
   });
+  const cartoFailures: number[] = [];
   try {
     // Les requêtes applicatives et leurs redirections ne peuvent pas sortir du
     // proxy qualifié. Seuls les GET publics de tuiles/styles Carto sont externes.
@@ -486,13 +488,29 @@ async function registerActor(browser: Browser): Promise<Actor> {
     const token = (await registered.json() as { access_token: string }).access_token;
 
     const page = await context.newPage();
+    const isCarto = (url: string) => new URL(url).hostname.endsWith('.cartocdn.com');
+    page.on('requestfailed', request => { if (isCarto(request.url())) cartoFailures.push(0); });
+    page.on('response', response => { if (isCarto(response.url()) && response.status() >= 400) cartoFailures.push(response.status()); });
+    await page.addInitScript(() => {
+      const history: unknown[] = [];
+      Object.assign(window, { __latencySceneHistory: history });
+      for (const name of ['beercall:scene-metric', 'beercall:scene-invalidate']) {
+        window.addEventListener(name, event => {
+          const detail = (event as CustomEvent<{ kind?: string; view?: string; generation?: number; timestamp?: number; drawCalls?: number }>).detail;
+          history.push({ event: name, kind: ['mapInteractive', 'avatarFrameSubmitted', 'sceneUsable', 'worldFrameSubmitted'].includes(detail.kind ?? '') ? detail.kind : null,
+            dashboard: detail.view === 'dashboard', generation: Number.isSafeInteger(detail.generation) ? detail.generation : null,
+            timestamp: Number.isFinite(detail.timestamp) ? detail.timestamp : null, drawCalls: Number.isFinite(detail.drawCalls) ? detail.drawCalls : null });
+          if (history.length > 50) history.shift();
+        });
+      }
+    });
     await page.goto('/login');
     await page.getByPlaceholder('Ton Pseudo', { exact: true }).fill(username);
     await page.getByPlaceholder('Mot de passe', { exact: true }).fill(password);
     await page.getByRole('button', { name: 'SE CONNECTER', exact: true }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
 
-    return { context, page, username, token };
+    return { context, page, username, token, cartoFailures };
   } catch {
     await context.close();
     throw new Error('Préparation acteur latence interrompue ; aucune mesure valide.');
@@ -520,6 +538,7 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
     let correlation: ReturnType<typeof correlateLogs> | undefined;
     let technicalFailure = false;
     let failureStage = 'préparation';
+    let failureDiagnostics: unknown = null;
     let timestampUtc = new Date().toISOString();
     try {
       failureStage = 'préparation/acteur';
@@ -617,6 +636,22 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
         guard(terminal.status === (kind === 'drink' ? 'succeeded' : 'rejected'), 'verdict réel non conforme au corpus sélectionné');
     } catch {
       technicalFailure = true;
+      if (actor) {
+        try {
+          const scene = await actor.page.evaluate(() => {
+            const w = window as unknown as { __beercall_scene_metrics?: Record<string, SceneSignal>; __latencySceneHistory?: unknown[] };
+            const signals = Object.fromEntries(['mapInteractive', 'avatarFrameSubmitted', 'sceneUsable'].map(kind => {
+              const signal = w.__beercall_scene_metrics?.[kind];
+              return [kind, signal ? { dashboard: signal.view === 'dashboard', hasInstance: Boolean(signal.instanceId),
+                generation: Number.isSafeInteger(signal.generation) ? signal.generation : null,
+                timestamp: Number.isFinite(signal.timestamp) ? signal.timestamp : null,
+                drawCalls: Number.isFinite(signal.drawCalls) ? signal.drawCalls : null } : null];
+            }));
+            return { hidden: document.hidden, signals, history: w.__latencySceneHistory ?? [] };
+          });
+          failureDiagnostics = { ...scene, cartoFailures: actor.cartoFailures };
+        } catch { /* Diagnostic best-effort, never replaces the original failure. */ }
+      }
     } finally {
       observer?.detach();
       try {
@@ -631,6 +666,7 @@ test.describe('Banc de mesure de latence réelle (PERF-01 / T07a)', () => {
           photoHash: photo.hash, job_id: observer?.acceptedId ?? 'inconnue', verdict: technicalFailure ? 'failed' : terminal!.status, observedVerdict: terminal?.status ?? 'inconnue', timestampUtc,
           ...(durations ?? partialDurations(marks)),
           technicalFailure, failureStage: technicalFailure ? failureStage : null,
+          failureDiagnostics,
           postsObserved: observer?.posts ?? 0,
           containers: Object.fromEntries(['api', 'worker'].map(role => {
             const c = qualified.stack[role as 'api' | 'worker'];
