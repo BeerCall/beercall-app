@@ -1,5 +1,3 @@
-version: '3.8'
-
 # C01 — Compose standalone isolé pour la recette locale de fluidité
 # Projet Docker Compose : beercall-fluidite-night
 # Aucun port de base ou de backend exposé ; uniquement le proxy nginx local sur 127.0.0.1:5180
