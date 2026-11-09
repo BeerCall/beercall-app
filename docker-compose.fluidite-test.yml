@@ -151,6 +151,7 @@ services:
         - VITE_FF_GLB_AVATAR=${VITE_FF_GLB_AVATAR:-1}
         - VITE_FF_GLB_WORLDS=${VITE_FF_GLB_WORLDS:-1}
         - VITE_WORLD_PROBE=${VITE_WORLD_PROBE:-}
+        - VITE_FF_PERF_PANEL=${VITE_FF_PERF_PANEL:-}
         - VITE_APP_COMMIT=${VITE_APP_COMMIT:-}
         - VITE_APP_BUILD_TIME=${VITE_APP_BUILD_TIME:-}
     restart: unless-stopped
