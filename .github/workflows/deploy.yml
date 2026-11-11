@@ -192,6 +192,16 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse a stale production release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          if [ "$latest" != "${{ github.sha }}" ]; then
+            echo "Release obsolète : main=${latest}, run=${GITHUB_SHA}. Aucun déploiement."
+            exit 1
+          fi
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -242,4 +252,5 @@ jobs:
             docker compose exec -T nginx_beercall nginx -t
             docker compose exec -T nginx_beercall nginx -s reload
             docker compose exec -T nginx_beercall wget -qO- http://127.0.0.1/api/health/ready
+            echo "${{ github.sha }} $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOME/beercall-releases.log"
             docker compose ps
