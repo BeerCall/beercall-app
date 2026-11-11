@@ -1,0 +1,109 @@
+name: Update submodule gitlink
+
+on:
+  repository_dispatch:
+    types: [submodule-updated]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: submodule-${{ github.event.client_payload.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update ${{ github.event.client_payload.repository }} gitlink
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate dispatch payload
+        env:
+          SUBMODULE: ${{ github.event.client_payload.repository }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          SOURCE_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          case "$SUBMODULE" in
+            beercall-frontend|beercall-backend) ;;
+            *) echo "Sous-module non autorisé : $SUBMODULE"; exit 1 ;;
+          esac
+          if ! printf '%s' "$TARGET_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "SHA invalide : $TARGET_SHA"; exit 1
+          fi
+          if ! printf '%s' "$SOURCE_REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "Référence invalide : $SOURCE_REF"; exit 1
+          fi
+
+      - name: Checkout beercall-app
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SUBMODULE_DISPATCH_TOKEN }}
+          fetch-depth: 0
+
+      - name: Update gitlink on a dedicated branch
+        env:
+          GH_TOKEN: ${{ secrets.SUBMODULE_DISPATCH_TOKEN }}
+          SUBMODULE: ${{ github.event.client_payload.repository }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          SOURCE_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          short_sha="${TARGET_SHA:0:7}"
+          branch="chore/submodule-${SUBMODULE}-${short_sha}"
+          git config user.name "beercall-ci"
+          git config user.email "ci@beercall.fr"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+          git submodule sync -- "$SUBMODULE"
+          git submodule update --init -- "$SUBMODULE"
+          git -C "$SUBMODULE" fetch origin "$SOURCE_REF" --depth=1 || git -C "$SUBMODULE" fetch origin
+          git -C "$SUBMODULE" checkout "$TARGET_SHA"
+          git add "$SUBMODULE"
+
+          if git diff --cached --quiet; then
+            echo "Gitlink déjà épinglé sur $TARGET_SHA ; aucune PR à créer."
+            echo "CHANGED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git switch -c "$branch"
+          git commit -m "chore(submodules): met à jour ${SUBMODULE} vers ${short_sha}"
+          git push origin "$branch"
+          {
+            echo "CHANGED=true"
+            echo "BRANCH=$branch"
+            echo "SHORT_SHA=$short_sha"
+            echo "APP_HEAD=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - name: Open pull request and enable auto-merge
+        if: env.CHANGED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SUBMODULE_DISPATCH_TOKEN }}
+          SUBMODULE: ${{ github.event.client_payload.repository }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          SOURCE_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          title="chore(submodules): ${SUBMODULE} → ${SHORT_SHA}"
+          body=$(cat <<EOF
+          Mise à jour automatique du gitlink \`${SUBMODULE}\` vers \`${TARGET_SHA}\`.
+
+          - Dépôt source : \`BeerCall/${SUBMODULE}\`
+          - Référence : \`${SOURCE_REF}\`
+          - Run source : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+
+          number=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+            number=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number')
+          fi
+
+          if [ -z "$number" ]; then
+            echo "PR introuvable après création pour $BRANCH"; exit 1
+          fi
+          gh pr merge "$number" --auto --squash --delete-branch
