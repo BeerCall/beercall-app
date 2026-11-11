@@ -16,6 +16,10 @@ if ! printf '%s' "$TARGET" | grep -Eq '^[0-9a-f]{40}$'; then
 fi
 
 APP_DIR="${BEERCALL_APP_DIR:-$HOME/beercall-app}"
+umask 077
+exec 9>"$HOME/.beercall-release.lock"
+flock -n 9 || { echo "Une opération de release est déjà en cours" >&2; exit 1; }
+SAFETY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/prod_safety.py"
 cd "$APP_DIR"
 
 if [ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=untracked)" ]; then
@@ -24,13 +28,20 @@ if [ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=untra
 fi
 
 git fetch origin
+git merge-base --is-ancestor "$TARGET" origin/main
+# Refuse an old image/schema BEFORE checkout or replacement of containers.
+CURRENT_SCHEMA=$(docker compose exec -T db_beercall sh -lc \
+  'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT version_num FROM alembic_version"')
+TARGET_BACKEND=$(git rev-parse "$TARGET:beercall-backend")
+git -C beercall-backend fetch origin
+python3 "$SAFETY" check-schema "$APP_DIR/beercall-backend" "$TARGET_BACKEND" "$CURRENT_SCHEMA"
 git checkout --detach "$TARGET"
 git submodule sync
 git submodule update --init --recursive
-cp .env beercall-frontend/.env 2>/dev/null || true
-cp .env beercall-backend/.env 2>/dev/null || true
+cp .env beercall-frontend/.env
+cp .env beercall-backend/.env
 
-docker compose up -d --build --wait --wait-timeout 180
+docker compose up -d --build --remove-orphans --wait --wait-timeout 180
 docker compose up -d --no-deps --force-recreate --wait --wait-timeout 60 nginx_beercall
 docker compose exec -T nginx_beercall nginx -t
 docker compose exec -T nginx_beercall nginx -s reload

@@ -45,6 +45,8 @@ jobs:
             echo "::add-mask::$value"
             echo "$name=$value" >> "$GITHUB_ENV"
           done
+      - name: Test backup and rollback guards offline
+        run: python3 -B -m unittest discover -s scripts/tests -p test_prod_safety.py -v
       - name: Validate gitlinks and Compose
         run: |
           git submodule status
@@ -225,22 +227,26 @@ jobs:
           command_timeout: 30m
           script: |
             set -eu
+            umask 077
+            exec 9>"$HOME/.beercall-release.lock"
+            flock -n 9 || { echo "Une opération de release est déjà en cours" >&2; exit 1; }
             cd $HOME/beercall-app
 
-            # Préflight : sauvegarde récente obligatoire avant toute mutation.
+            # Re-check on the VPS under the same lock as backup and rollback.
+            git fetch origin
+            if [ "$(git rev-parse origin/main)" != "${{ github.sha }}" ]; then
+              echo "Release obsolète sur le VPS ; aucun checkout ni redémarrage."
+              exit 1
+            fi
+            PREV_SHA=$(git rev-parse HEAD)
+            # Read the reviewed helper from the fetched release without checking
+            # it out first (bootstrap: it does not yet exist on the old VPS).
             BACKUP_ROOT="${BEERCALL_BACKUP_DIR:-$HOME/beercall_backups}"
             BACKUP_MARKER="$BACKUP_ROOT/LATEST"
-            if [ -L "$BACKUP_MARKER" ] || [ ! -s "$BACKUP_MARKER" ]; then
-              echo "Erreur : sauvegarde vérifiée absente ($BACKUP_MARKER). Lancez scripts/prod_backup.sh."
-              exit 1
-            fi
-            if [ -n "$(find "$BACKUP_MARKER" -mmin +1440 -print -quit)" ]; then
-              echo "Erreur : sauvegarde de plus de 24 h. Relancez scripts/prod_backup.sh."
-              exit 1
-            fi
+            SAFETY=$(git show "${{ github.sha }}:scripts/prod_safety.py")
+            printf '%s\n' "$SAFETY" | python3 - verify-backup "$BACKUP_MARKER" "$PREV_SHA"
 
             # Sauvegarder le SHA précédent pour rollback documenté
-            PREV_SHA=$(git rev-parse HEAD || echo "unknown")
             echo "SHA précédent pour rollback : $PREV_SHA"
             
             # Conserver les uploads et .env non suivis ; ne jamais forcer/deinit les modules.
@@ -251,7 +257,6 @@ jobs:
             fi
             
             # Mettre à jour le parent en récupérant le commit exact
-            git fetch origin
             git checkout --detach ${{ github.sha }}
             
             # Mettre à jour les sous-modules exactement sur les SHA épinglés
@@ -263,8 +268,8 @@ jobs:
             git submodule status
             
             # Copier le .env racine dans les sous-modules (indispensable pour ViteJS)
-            cp .env beercall-frontend/.env 2>/dev/null || true
-            cp .env beercall-backend/.env 2>/dev/null || true
+            cp .env beercall-frontend/.env
+            cp .env beercall-backend/.env
 
             # On reconstruit avec Docker Compose
             docker compose up -d --build --wait --wait-timeout 180
