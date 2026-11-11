@@ -211,7 +211,8 @@ class UpdateTests(unittest.TestCase):
                 raise AssertionError(path)
             return api
 
-        for ruleset in (bypass, missing):
+        excluded = {**base, "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": ["refs/heads/*"]}}}
+        for ruleset in (bypass, missing, excluded):
             with patch.object(updater, "api_json", side_effect=api_for(ruleset)):
                 with self.assertRaises(ValueError):
                     updater.verify_protection()

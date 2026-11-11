@@ -1,5 +1,6 @@
 """Monotonic gitlink PR updates. Never execute code from the source module."""
 import json
+from fnmatch import fnmatchcase
 import os
 from pathlib import Path
 import re
@@ -143,9 +144,12 @@ def _verify_rulesets() -> bool:
         ref_name = (ruleset.get("conditions") or {}).get("ref_name") or {}
         include = set(ref_name.get("include") or [])
         exclude = set(ref_name.get("exclude") or [])
-        if "refs/heads/main" in exclude:
+        def matches(pattern: str) -> bool:
+            return pattern in {"~DEFAULT_BRANCH", "~ALL"} or fnmatchcase("refs/heads/main", pattern)
+
+        if any(matches(pattern) for pattern in exclude):
             continue
-        if not ({"~DEFAULT_BRANCH", "refs/heads/main"} & include):
+        if not any(matches(pattern) for pattern in include):
             continue
         applicable.append(ruleset)
 
