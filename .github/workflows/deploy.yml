@@ -213,7 +213,19 @@ jobs:
           script: |
             set -eu
             cd $HOME/beercall-app
-            
+
+            # Préflight : sauvegarde récente obligatoire avant toute mutation.
+            BACKUP_ROOT="${BEERCALL_BACKUP_DIR:-$HOME/beercall_backups}"
+            BACKUP_MARKER="$BACKUP_ROOT/LATEST"
+            if [ -L "$BACKUP_MARKER" ] || [ ! -s "$BACKUP_MARKER" ]; then
+              echo "Erreur : sauvegarde vérifiée absente ($BACKUP_MARKER). Lancez scripts/prod_backup.sh."
+              exit 1
+            fi
+            if [ -n "$(find "$BACKUP_MARKER" -mmin +1440 -print -quit)" ]; then
+              echo "Erreur : sauvegarde de plus de 24 h. Relancez scripts/prod_backup.sh."
+              exit 1
+            fi
+
             # Sauvegarder le SHA précédent pour rollback documenté
             PREV_SHA=$(git rev-parse HEAD || echo "unknown")
             echo "SHA précédent pour rollback : $PREV_SHA"
