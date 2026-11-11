@@ -51,6 +51,19 @@ jobs:
           if git submodule status | grep -E '^[-+U]'; then exit 1; fi
           docker compose config --quiet
           docker compose -f docker-compose.e2e.yml config --quiet
+      - name: Validate production topology and avatar rendering files
+        run: |
+          set -euo pipefail
+          services="$(docker compose config --services)"
+          for service in backend frontend db_beercall beer_worker daily_worker avatar-renderer avatar-sprite-worker; do
+            if ! printf '%s\n' "$services" | grep -Fxq "$service"; then
+              echo "Service de production manquant : $service"
+              exit 1
+            fi
+          done
+          test -f beercall-frontend/tools/avatar-renderer/Dockerfile
+          test -f beercall-backend/workers/avatar_sprite_worker.py
+          test -f beercall-backend/workers/beer_call_worker.py
       - name: Install smoke dependencies
         run: python -m pip install httpx websockets
       - name: Resolve and pull base images
