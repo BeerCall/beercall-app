@@ -68,6 +68,26 @@ class SafetyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 safety.verify_remote(REMOTE, hashlib.sha256(incomplete.encode()).hexdigest())
 
+    def test_restricted_receiver_protocol_cannot_use_another_destination(self) -> None:
+        base = "beercall_backup@backup.example.invalid:/var/lib/beercall-backup/archive"
+        run = "20261111T210000Z-0123456789ab"
+        with patch.object(safety, "settings", return_value={"protocol": "restricted-v1", "remote": base}):
+            self.assertEqual(safety.receiver_command(base + "/" + run, "init"), f"bc-backup-init {run}")
+            self.assertEqual(safety.receiver_command(base + "/" + run, "verify"), f"bc-backup-verify {run}")
+            for destination in [base + "/../escape", base + "/other", REMOTE]:
+                with self.assertRaises(ValueError):
+                    safety.receiver_command(destination, "init")
+
+    def test_backup_configuration_requires_a_private_regular_file(self) -> None:
+        path = self.root / "backup.json"
+        path.write_text(json.dumps({"protocol": "restricted-v1", "remote": REMOTE}))
+        path.chmod(0o600)
+        with patch.dict(os.environ, {"BEERCALL_BACKUP_CONFIG": str(path)}):
+            self.assertEqual(safety.settings()["protocol"], "restricted-v1")
+            path.write_text(json.dumps({"protocol": "unknown"}))
+            with self.assertRaises(ValueError):
+                safety.settings()
+
     def test_remote_verification_failure_blocks_deployment(self) -> None:
         self.marker_write(self.data)
         with patch.object(safety, "verify_remote", side_effect=subprocess.CalledProcessError(1, "ssh")):

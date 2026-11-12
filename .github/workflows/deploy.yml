@@ -46,7 +46,7 @@ jobs:
             echo "$name=$value" >> "$GITHUB_ENV"
           done
       - name: Test backup and rollback guards offline
-        run: python3 -B -m unittest discover -s scripts/tests -p test_prod_safety.py -v
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - name: Validate gitlinks and Compose
         run: |
           git submodule status
@@ -241,10 +241,10 @@ jobs:
             PREV_SHA=$(git rev-parse HEAD)
             # Read the reviewed helper from the fetched release without checking
             # it out first (bootstrap: it does not yet exist on the old VPS).
-            BACKUP_ROOT="${BEERCALL_BACKUP_DIR:-$HOME/beercall_backups}"
-            BACKUP_MARKER="$BACKUP_ROOT/LATEST"
             SAFETY=$(git show "${{ github.sha }}:scripts/prod_safety.py")
-            printf '%s\n' "$SAFETY" | python3 - verify-backup "$BACKUP_MARKER" "$PREV_SHA"
+            # Fresh durable backup on every release, using approved private
+            # host configuration. Failure leaves the running production intact.
+            printf '%s\n' "$SAFETY" | python3 - preflight-backup "$PREV_SHA"
 
             # Sauvegarder le SHA précédent pour rollback documenté
             echo "SHA précédent pour rollback : $PREV_SHA"

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -13,6 +14,48 @@ import tempfile
 import uuid
 
 FILES = ("db.dump", "uploads.tgz", "config.tgz", "metadata.json", "SHA256SUMS")
+
+
+def private_file(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and (info.st_mode & 0o077 or info.st_uid != os.getuid())):
+        raise ValueError("Fichier de configuration non privé ou symbolique")
+
+
+def settings() -> dict:
+    path = Path(os.environ.get("BEERCALL_BACKUP_CONFIG", str(Path.home() / ".config/beercall/backup.json")))
+    data = {}
+    if path.exists():
+        private_file(path)
+        data = json.loads(path.read_text())
+    for variable, field in [("BEERCALL_BACKUP_REMOTE", "remote"), ("BEERCALL_BACKUP_DIR", "backup_dir")]:
+        if variable in os.environ:
+            data[field] = os.environ[variable]
+    if data.get("protocol", "ssh-v1") not in {"ssh-v1", "restricted-v1"}:
+        raise ValueError("Protocole backup inconnu")
+    return data
+
+
+def ssh_options() -> list[str]:
+    args = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15"]
+    config = settings().get("ssh_config")
+    if config:
+        private_file(Path(config))
+        args += ["-F", config]
+    return args
+
+
+def receiver_command(destination: str, operation: str) -> str | None:
+    config = settings()
+    if config.get("protocol") != "restricted-v1":
+        return None
+    base = config["remote"].rstrip("/") + "/"
+    if not destination.startswith(base):
+        raise ValueError("Destination différente du récepteur approuvé")
+    run = destination[len(base):]
+    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", run):
+        raise ValueError("Identifiant backup invalide")
+    return f"bc-backup-{operation} {run}"
 
 
 def remote_parts(destination: str) -> tuple[str, str]:
@@ -29,19 +72,19 @@ def remote_parts(destination: str) -> tuple[str, str]:
 
 
 def ssh(host: str, command: str) -> str:
-    return subprocess.check_output(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, command], text=True)
+    return subprocess.check_output([*ssh_options(), host, command], text=True)
 
 
 def verify_remote(destination: str, expected: str) -> None:
     host, path = remote_parts(destination)
     # Paths have already been restricted to shell-safe characters.
-    manifest = ssh(host, f"cat -- '{path}/SHA256SUMS'")
+    manifest = ssh(host, receiver_command(destination, "manifest") or f"cat -- '{path}/SHA256SUMS'")
     if hashlib.sha256(manifest.encode()).hexdigest() != expected:
         raise ValueError("Manifeste de sauvegarde distant différent du marqueur")
     entries = dict((name, digest) for digest, name in re.findall(r"^([0-9a-f]{64})  ([a-z.]+)$", manifest, re.M))
     if set(entries) != set(FILES[:-1]) or len(manifest.splitlines()) != len(FILES) - 1:
         raise ValueError("Manifeste de sauvegarde invalide")
-    ssh(host, f"cd -- '{path}' && sha256sum --check --strict SHA256SUMS >/dev/null")
+    ssh(host, receiver_command(destination, "verify") or f"cd -- '{path}' && sha256sum --check --strict SHA256SUMS >/dev/null")
 
 
 def validate_marker(path: Path, release: str, now: datetime | None = None) -> dict:
@@ -107,8 +150,8 @@ def backup(app: Path, root: Path, destination: str) -> None:
             manifest += f"{file_hash.hexdigest()}  {name}\n"
         (work / "SHA256SUMS").write_text(manifest, encoding="ascii")
         digest = hashlib.sha256(manifest.encode()).hexdigest()
-        ssh(host, f"umask 077; mkdir -p -- '{base}' && test ! -L '{base}' && test \"$(stat -c %a -- '{base}')\" = 700 && mkdir -m 700 -- '{base}/{stamp}'")
-        subprocess.run(["rsync", "-a", "--chmod=D700,F600", "-e", "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes", str(work) + "/", remote + "/"], check=True)
+        ssh(host, receiver_command(remote, "init") or f"umask 077; mkdir -p -- '{base}' && test ! -L '{base}' && test \"$(stat -c %a -- '{base}')\" = 700 && mkdir -m 700 -- '{base}/{stamp}'")
+        subprocess.run(["rsync", "-a", "--chmod=D700,F600", "-e", shlex.join(ssh_options()), str(work) + "/", remote + "/"], check=True)
         verify_remote(remote, digest)
         data = {"version": 1, "release": release, "remote": remote,
                 "created_at": created, "manifest_sha256": digest}
@@ -136,12 +179,16 @@ def check_schema(backend: Path, target: str, current: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["backup", "verify-backup", "check-schema"])
+    parser.add_argument("action", choices=["backup", "verify-backup", "preflight-backup", "check-schema"])
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
-    if args.action == "backup":
+    if args.action in {"backup", "preflight-backup"}:
+        config = settings()
+        root = Path(config.get("backup_dir", str(Path.home() / "beercall_backups")))
         backup(Path(os.environ.get("BEERCALL_APP_DIR", str(Path.home() / "beercall-app"))),
-               Path(os.environ.get("BEERCALL_BACKUP_DIR", str(Path.home() / "beercall_backups"))), os.environ["BEERCALL_BACKUP_REMOTE"])
+               root, config["remote"])
+        if args.action == "preflight-backup":
+            validate_marker(root / "LATEST", args.arguments[0])
     elif args.action == "verify-backup":
         validate_marker(Path(args.arguments[0]), args.arguments[1])
     else:
