@@ -246,6 +246,14 @@ jobs:
             echo "Parent SHA déployé : $(git rev-parse HEAD)"
             git submodule status
             
+            # Les images non-root (worker nginx et pwuser du renderer) doivent
+            # lire les sources et les assets publics recrees sous umask 077.
+            chmod -R a+rX beercall-frontend/src beercall-frontend/public \
+              beercall-frontend/tools beercall-frontend/scripts
+            chmod a+rX beercall-frontend/package.json \
+              beercall-frontend/package-lock.json beercall-frontend/tsconfig*.json \
+              beercall-frontend/Dockerfile beercall-frontend/nginx/default.conf
+
             # Copier le .env racine dans les sous-modules (indispensable pour ViteJS)
             cp .env beercall-frontend/.env
             cp .env beercall-backend/.env
