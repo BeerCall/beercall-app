@@ -26,6 +26,7 @@ jobs:
       DB_USER: ci_user
       DB_PASSWORD: ci_only_password
       DB_NAME: beercall_test
+      FLUIDITE_TEST_SECRET: ci_only_fluidite_secret
       BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
       BEERCALL_E2E_PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.13-slim
       BEERCALL_E2E_NODE_IMAGE: public.ecr.aws/docker/library/node:22-alpine
@@ -53,6 +54,7 @@ jobs:
           if git submodule status | grep -E '^[-+U]'; then exit 1; fi
           docker compose config --quiet
           docker compose -f docker-compose.e2e.yml config --quiet
+          docker compose -f docker-compose.fluidite-test.yml config --quiet
       - name: Validate production topology and avatar rendering files
         run: |
           set -euo pipefail
@@ -117,14 +119,7 @@ jobs:
   e2e-browser:
     name: E2E browser (Chromium)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      BEERCALL_E2E_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:15-alpine
-      BEERCALL_E2E_PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.13-slim
-      BEERCALL_E2E_NODE_IMAGE: public.ecr.aws/docker/library/node:22-alpine
-      BEERCALL_E2E_NGINX_IMAGE: public.ecr.aws/docker/library/nginx:stable-alpine
-      BEERCALL_E2E_PROXY_IMAGE: public.ecr.aws/docker/library/nginx:alpine
-      BEERCALL_EXPECT_HDR: absent
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,24 +128,26 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: e2e/package-lock.json
-      - name: Prepare isolated test key
-        run: |
-          value=$(openssl rand -hex 32)
-          echo "::add-mask::$value"
-          echo "BEERCALL_E2E_SECRET_KEY=$value" >> "$GITHUB_ENV"
+          cache-dependency-path: beercall-frontend/package-lock.json
       - name: Validate pinned gitlinks
         run: |
           if git submodule status | grep -E '^[-+U]'; then exit 1; fi
-      - name: Resolve and pull base images
+      - name: Install release scenario dependencies
+        working-directory: beercall-frontend
+        run: npm ci --legacy-peer-deps
+      - name: Install Chromium
+        working-directory: beercall-frontend
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Resolve base images
         run: |
           set -euo pipefail
-          resolve() {
-            local ecr="$1" hub="$2"
-            for image in "$ecr" "$hub"; do
+          resolve_tag() {
+            local target="$1" source
+            shift
+            for source in "$@"; do
               for attempt in 1 2; do
-                if docker pull "$image" >&2; then
-                  echo "$image"
+                if docker pull "$source"; then
+                  if [ "$source" != "$target" ]; then docker tag "$source" "$target"; fi
                   return 0
                 fi
                 sleep $((attempt * 10))
@@ -158,49 +155,29 @@ jobs:
             done
             return 1
           }
-          POSTGRES=$(resolve "$BEERCALL_E2E_POSTGRES_IMAGE" "postgres:15-alpine")
-          PROXY=$(resolve "$BEERCALL_E2E_PROXY_IMAGE" "nginx:alpine")
-          PYTHON=$(resolve "$BEERCALL_E2E_PYTHON_IMAGE" "python:3.13-slim")
-          NODE=$(resolve "$BEERCALL_E2E_NODE_IMAGE" "node:22-alpine")
-          NGINX=$(resolve "$BEERCALL_E2E_NGINX_IMAGE" "nginx:stable-alpine")
-          {
-            echo "BEERCALL_E2E_POSTGRES_IMAGE=$POSTGRES"
-            echo "BEERCALL_E2E_PROXY_IMAGE=$PROXY"
-            echo "BEERCALL_E2E_PYTHON_IMAGE=$PYTHON"
-            echo "BEERCALL_E2E_NODE_IMAGE=$NODE"
-            echo "BEERCALL_E2E_NGINX_IMAGE=$NGINX"
-          } >> "$GITHUB_ENV"
-      - name: Build and start browser test composition
-        run: |
-          for attempt in 1 2; do
-            if docker compose -f docker-compose.e2e.yml up -d --build --wait --wait-timeout 180; then exit 0; fi
-          done
-          exit 1
-      - name: Install isolated browser test dependencies
-        working-directory: e2e
-        run: npm ci
-      - name: Install Chromium
-        working-directory: e2e
-        run: npx playwright install --with-deps chromium
-      - name: Run browser E2E
-        working-directory: e2e
-        run: npx playwright test
-      - name: Capture composition logs on failure
-        if: failure()
-        run: docker compose -f docker-compose.e2e.yml logs --no-color --tail 150 > e2e-compose.log
-      - name: Upload failure diagnostics
-        if: failure()
+          resolve_tag postgres:15-alpine public.ecr.aws/docker/library/postgres:15-alpine postgres:15-alpine
+          resolve_tag python:3.13-slim public.ecr.aws/docker/library/python:3.13-slim python:3.13-slim
+          resolve_tag node:22-alpine public.ecr.aws/docker/library/node:22-alpine node:22-alpine
+          resolve_tag nginx:stable-alpine public.ecr.aws/docker/library/nginx:stable-alpine nginx:stable-alpine
+      # Current 39-scenario release recipe on a disposable stack, with a fresh
+      # E2E-only coverage gate: >=75% frontend lines and >=75% backend lines.
+      # The historical e2e/ suite stays in the repository as evidence; its
+      # replacement map is docs/reviews/e2e-recipe-11c-2026-11-13.md.
+      - name: Run current release recipe with E2E coverage gate
+        run: python3 scripts/run_release_e2e.py --output "$RUNNER_TEMP/release-e2e" --port 5180
+      - name: Upload release recipe diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-browser-failure
+          name: release-recipe
           path: |
-            e2e-compose.log
-            e2e/test-results/
+            ${{ runner.temp }}/release-e2e/front-report/coverage-summary.json
+            ${{ runner.temp }}/release-e2e/backend-report.json
+            ${{ runner.temp }}/release-e2e/playwright/report.json
+            ${{ runner.temp }}/release-e2e/playwright/html-report/
+            ${{ runner.temp }}/release-e2e/compose.log
           if-no-files-found: warn
           retention-days: 7
-      - name: Remove ephemeral test containers and volumes
-        if: always()
-        run: docker compose -f docker-compose.e2e.yml down -v
 
   deploy:
     needs: [validate, e2e-browser]
