@@ -11,6 +11,7 @@ import re
 import secrets
 import socket
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 # Current release recipe: the fluidite suite without the world-probe measurements.
@@ -78,6 +79,75 @@ def lock_recipe(frontend, specs, env):
     if tests != RELEASE_SCENARIOS:
         raise ValueError(f"Recette de release modifiée : {tests} scénarios dans {files} fichiers, attendu {RELEASE_SCENARIOS}")
     print(f"RELEASE RECIPE LOCKED: {tests} scénarios dans {files} fichiers", flush=True)
+
+
+def verify_results(report):
+    """A listed test is not necessarily executed: skips/expected failures are red."""
+    data = json.loads(report.read_text(encoding="utf-8"))
+    tests = []
+
+    def visit(suite):
+        for spec in suite.get("specs", []):
+            tests.extend(spec.get("tests", []))
+        for child in suite.get("suites", []):
+            visit(child)
+
+    visit(data)
+    if data.get("errors") or len(tests) != RELEASE_SCENARIOS:
+        raise ValueError("Rapport E2E incomplet ou erreurs globales Playwright")
+    for test in tests:
+        results = test.get("results", [])
+        if (test.get("expectedStatus") != "passed" or test.get("status") != "expected"
+                or len(results) != 1 or results[0].get("status") != "passed"):
+            raise ValueError("Les 39 scénarios doivent réussir sans skip, échec attendu ni retry")
+    print(f"RELEASE RESULTS VERIFIED: {len(tests)} scénarios réussis", flush=True)
+
+
+def run_recipe_and_reports(frontend, specs, env, compose, out):
+    """Collect partial coverage even on a red recipe, without masking its error."""
+    recipe_error = None
+    try:
+        command(playwright_test(frontend, *[spec.relative_to(frontend).as_posix() for spec in specs]),
+                cwd=frontend, env=env)
+        verify_results(out / "playwright/report.json")
+    except Exception as error:
+        recipe_error = error
+    try:
+        command([*compose, "stop", "backend", "beer_worker", "daily_worker", "avatar-sprite-worker"], env=env)
+        # A fresh one-shot container combines only the API/worker data files.
+        command([*compose, "run", "--rm", "--no-deps", "backend", "python", "-m", "coverage", "combine"], env=env)
+        command([*compose, "run", "--rm", "--no-deps", "backend", "python", "-m", "coverage", "json", "-o", "/coverage/coverage.json"], env=env)
+        remap_front(out / "front-raw", frontend)
+        command(["node", frontend / "scripts/fluidite/coverage-report.mjs", out / "front-raw", frontend / "src", out / "front-report"], env=env)
+        command(["node", frontend / "scripts/fluidite/backend-coverage-report.mjs", out / "backend-raw/coverage.json", out / "backend-report.json"], env=env)
+        gate(json.loads((out / "front-report/coverage-summary.json").read_text()), json.loads((out / "backend-report.json").read_text()))
+    except Exception as error:
+        if recipe_error is None:
+            raise
+        print(f"Rapports partiels indisponibles : {error}", file=sys.stderr)
+    if recipe_error is not None:
+        raise recipe_error
+
+
+def cleanup(compose, env, out, config, failed):
+    """Try every cleanup step; retain the original failure and always remove keys."""
+    errors = []
+    try:
+        try:
+            with (out / "compose.log").open("w", encoding="utf-8") as log:
+                command([*compose, "logs", "--no-color", "--tail", "150"], env=env, stdout=log, stderr=subprocess.STDOUT)
+        except Exception as error:
+            errors.append(error)
+        try:
+            command([*compose, "down", "-v", "--remove-orphans"], env=env)
+        except Exception as error:
+            errors.append(error)
+    finally:
+        config.unlink(missing_ok=True)
+    for error in errors:
+        print(f"Nettoyage E2E incomplet : {error}", file=sys.stderr)
+    if errors and not failed:
+        raise errors[0]
 
 
 def main():
@@ -175,23 +245,12 @@ def main():
         (frontend.parent / ".openchamber/screenshots").mkdir(parents=True, exist_ok=True)
         specs = release_specs(frontend)
         lock_recipe(frontend, specs, env)
-        command(playwright_test(frontend, *[spec.relative_to(frontend).as_posix() for spec in specs]),
-                cwd=frontend, env=env)
-        command([*compose, "stop", "backend", "beer_worker", "daily_worker", "avatar-sprite-worker"], env=env)
-        # A fresh one-shot container combines only the API/worker data files.
-        command([*compose, "run", "--rm", "--no-deps", "backend", "python", "-m", "coverage", "combine"], env=env)
-        command([*compose, "run", "--rm", "--no-deps", "backend", "python", "-m", "coverage", "json", "-o", "/coverage/coverage.json"], env=env)
-        remap_front(out / "front-raw", frontend)
-        command(["node", frontend / "scripts/fluidite/coverage-report.mjs", out / "front-raw", frontend / "src", out / "front-report"], env=env)
-        command(["node", frontend / "scripts/fluidite/backend-coverage-report.mjs", out / "backend-raw/coverage.json", out / "backend-report.json"], env=env)
-        gate(json.loads((out / "front-report/coverage-summary.json").read_text()), json.loads((out / "backend-report.json").read_text()))
+        run_recipe_and_reports(frontend, specs, env, compose, out)
     finally:
         if started:
-            with (out / "compose.log").open("w", encoding="utf-8") as log:
-                subprocess.run([*compose, "logs", "--no-color", "--tail", "150"], env=env, stdout=log, stderr=subprocess.STDOUT)
-            command([*compose, "down", "-v", "--remove-orphans"], env=env)
-        # Do not publish generated topology containing even the synthetic key.
-        config.unlink(missing_ok=True)
+            cleanup(compose, env, out, config, failed=sys.exc_info()[0] is not None)
+        else:
+            config.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
