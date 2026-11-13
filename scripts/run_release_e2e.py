@@ -157,6 +157,10 @@ def main():
     try:
         started = True
         command([*compose, "build", "migrate", "frontend", "avatar-renderer"], env=env)
+        # Initialise le volume uploads depuis l'image avant le demarrage
+        # concurrent des services qui le montent (course Docker mkdir/aperos).
+        command([*compose, "run", "--rm", "--no-deps", "-T", "backend",
+                 "python", "-c", "print('uploads volume ready')"], env=env)
         command([*compose, "up", "-d", "--wait", "--wait-timeout", "240"], env=env)
         cid = subprocess.check_output([*compose, "ps", "-q", "backend"], env=env, text=True).strip()
         command([*compose, "exec", "-T", "backend", "python", "scripts/seed_fluidite_demo.py"], env=env)
