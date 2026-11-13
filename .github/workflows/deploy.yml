@@ -118,7 +118,9 @@ jobs:
 
   e2e-browser:
     name: E2E browser (Chromium)
-    runs-on: ubuntu-latest
+    # Playwright 1.58.2 (pinned by the frontend and its renderer image) does not
+    # support Chromium on ubuntu-26.04, which ubuntu-latest now resolves to.
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
