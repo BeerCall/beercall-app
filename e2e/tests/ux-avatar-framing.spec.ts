@@ -2,7 +2,9 @@ import { test, expect, type Page, type BrowserContext } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve, relative, isAbsolute } from 'node:path';
-import { installUxFixtures, type InstalledFixtures } from './support/uxFixtures';
+import { installUxFixtures } from './support/uxFixtures';
+import { assertAvatarCandidate } from './support/avatarGraphics';
+type InstalledFixtures = Awaited<ReturnType<typeof installUxFixtures>>;
 
 const backendWorkspace = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
 
@@ -59,6 +61,9 @@ export type Sample = {
   frame: number;
   elapsed: number;
   frameloop?: string;
+  opaque: number;
+  colors: number;
+  current: boolean;
 };
 
 // Observation du renderer via le hook global DevTools standard sans fortes références
@@ -89,17 +94,21 @@ async function observeRenderer(page: Page) {
     type Fiber = {
       child?: Fiber;
       sibling?: Fiber;
+      return?: Fiber;
       memoizedProps?: {
         config?: any;
         groupRef?: { current?: Object3D };
         client?: { invalidateQueries: Function };
+        value?: { registry?: Registry };
+        session?: { registry?: Registry };
       };
       memoizedState?: any;
       type?: any;
     };
 
-    const canvasToGroup = new WeakMap<HTMLCanvasElement, Object3D>();
-    const activeGroups = new Set<Object3D>();
+    type Certificate = {signature: string; generation: number; drawCalls: number; copies: number; timestamp: number};
+    type Job = {id: string; signature: string; ready: boolean; group?: Object3D; camera?: State['camera']; frame?: Certificate; lastFrame?: HTMLCanvasElement};
+    type Registry = {generation: number; isActive(job: Job): boolean; getSnapshot(): {views: {id: string; signature: string; jobId: string; frame?: Certificate}[]; jobs: Job[]}};
 
     // Conserver l'éventuel hook préexistant
     (window as any).__prevDevToolsHook = (window as any).__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -120,44 +129,46 @@ async function observeRenderer(page: Page) {
           if (props?.client && typeof props.client.invalidateQueries === 'function') {
             (window as any).__queryClient = props.client;
           }
-          if (props?.config?.head && props.groupRef?.current) {
-            const group = props.groupRef.current;
-            activeGroups.add(group);
-            const state = group.__r3f?.root?.getState?.();
-            if (state?.gl?.domElement) {
-              canvasToGroup.set(state.gl.domElement, group);
-            }
-          }
           if (fiber.child) visit(fiber.child);
           if (fiber.sibling) visit(fiber.sibling);
         };
         visit(root.current);
       },
-      onCommitFiberUnmount(fiber: any) {
-        const group = fiber?.memoizedProps?.groupRef?.current;
-        if (group) {
-          activeGroups.delete(group);
-        }
-      },
+      onCommitFiberUnmount() {},
     };
 
     (window as any).__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
 
-    (window as any).__readFraming = (canvas: HTMLCanvasElement): Sample | null => {
-      let group = canvasToGroup.get(canvas);
-      if (!group) {
-        for (const g of activeGroups) {
-          const state = g.__r3f?.root?.getState?.();
-          if (state?.gl?.domElement === canvas) {
-            group = g;
-            canvasToGroup.set(canvas, g);
-            break;
-          }
-        }
+    (window as any).__readFraming = (canvas: HTMLCanvasElement, preparedSource = false): Sample | null => {
+      const key = Object.keys(canvas).find(key => key.startsWith('__reactFiber$'));
+      let fiber = key ? (canvas as unknown as Record<string, Fiber>)[key] : undefined;
+      let registry: Registry | undefined;
+      while (fiber) {
+        registry = (fiber.memoizedProps?.value ?? fiber.memoizedProps?.session)?.registry;
+        if (registry) break;
+        fiber = fiber.return;
       }
-      if (!group) return null;
-      const state = group.__r3f?.root?.getState?.();
-      if (!state || state.gl.domElement !== canvas) return null;
+      if (!registry) return null;
+      const snapshot = registry.getSnapshot();
+      const id = canvas.closest<HTMLElement>('[data-avatar-view]')?.dataset.avatarView;
+      const view = snapshot.views.find(view => view.id === id);
+      if (!view) return null;
+      const job = preparedSource
+        ? snapshot.jobs.find(job => job.signature === view.signature && job.ready && job.frame && !registry!.isActive(job))
+        : snapshot.jobs.find(job => job.id === view.jobId);
+      const certificate = preparedSource ? job?.frame : view.frame;
+      const group = job?.group;
+      const rootState = group?.__r3f?.root?.getState?.();
+      if (!group || !job?.camera || !rootState || !certificate) return null;
+      const state = {...rootState, camera: job.camera};
+      const source = preparedSource ? job.lastFrame : canvas;
+      if (!source) return null;
+      const scratch = document.createElement('canvas'); scratch.width = source.width; scratch.height = source.height;
+      const context = scratch.getContext('2d', {willReadFrequently: true});
+      context?.drawImage(source, 0, 0);
+      const pixels = context?.getImageData(0, 0, scratch.width, scratch.height).data;
+      let opaque = 0; const colors = new Set<string>();
+      if (pixels) for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] > 0) {opaque++; colors.add(`${pixels[i] >> 4}:${pixels[i + 1] >> 4}:${pixels[i + 2] >> 4}`);}
 
       group.updateMatrixWorld(true);
       let union: Box | undefined;
@@ -213,9 +224,12 @@ async function observeRenderer(page: Page) {
         camera: state.camera.position.toArray(),
         view: state.camera.matrixWorldInverse.toArray(),
         projection: state.camera.projectionMatrix.toArray(),
-        ...state.gl.info.render,
+        calls: certificate.drawCalls,
+        frame: certificate.copies,
         elapsed: state.clock.elapsedTime,
-        frameloop: state.frameloop,
+        frameloop: registry.isActive(job) ? 'always' : 'never',
+        opaque, colors: colors.size,
+        current: job.ready && certificate.signature === view.signature && certificate.generation === registry.generation,
       };
     };
   });
@@ -258,6 +272,7 @@ interface HarnessState {
 }
 
 async function setupHarness(context: BrowserContext, page: Page, initialFriends?: any[]): Promise<HarnessState> {
+  await assertAvatarCandidate();
   await observeRenderer(page);
   const models = await getCachedModels();
   const hits = new Set<string>();
@@ -326,7 +341,7 @@ async function setupHarness(context: BrowserContext, page: Page, initialFriends?
       return route.fallback(); // explicit unavailable-decor fixture, outside avatar whitelist
     }
     if (path === '/models/prepared/manifest.json') {
-      return route.fulfill({ json: preparedManifest });
+      return preparedMode ? route.fulfill({ json: preparedManifest }) : route.fulfill({status: 404, body: 'Production FBX fallback'});
     }
     if (preparedMode && path.startsWith('/models/prepared/')) {
       const model = preparedModels.get(path.slice('/models/prepared/'.length));
@@ -397,6 +412,9 @@ export function assertFramed(
   width: number,
   height: number
 ) {
+  expect(sample.current, 'certificate belongs to this view and GPU generation').toBe(true);
+  expect(sample.opaque, 'presented pixels are not transparent').toBeGreaterThan(10);
+  expect(sample.colors, 'presented pixels contain a real varied avatar').toBeGreaterThan(2);
   // 1. Draw calls de la frame réelle
   expect(sample.calls, 'draw calls de la frame réelle').toBeGreaterThan(0);
 
@@ -414,14 +432,11 @@ export function assertFramed(
   }
 
   // 3. NDC <= 0.8 en continu
-  for (const mesh of sample.meshes) {
-    for (const point of mesh.corners) {
-      expect(point.every(Number.isFinite)).toBe(true);
-      expect(Math.abs(point[0]), 'marge horizontale 10 % pendant Idle (NDC <= 0.8)').toBeLessThanOrEqual(0.8001);
-      expect(Math.abs(point[1]), 'marge verticale 10 % pendant Idle (NDC <= 0.8)').toBeLessThanOrEqual(0.8001);
-      expect(Math.abs(point[2]), 'near/far depth NDC').toBeLessThan(1);
-    }
-  }
+  const points = sample.meshes.flatMap(mesh => mesh.corners);
+  expect(points.every(point => point.every(Number.isFinite))).toBe(true);
+  expect(Math.max(...points.map(point => Math.abs(point[0]))), 'marge horizontale 10 % pendant Idle (NDC <= 0.8)').toBeLessThanOrEqual(0.8001);
+  expect(Math.max(...points.map(point => Math.abs(point[1]))), 'marge verticale 10 % pendant Idle (NDC <= 0.8)').toBeLessThanOrEqual(0.8001);
+  expect(Math.max(...points.map(point => Math.abs(point[2]))), 'near/far depth NDC').toBeLessThan(1);
 
   // 4. Centre assemblage +-2px
   expect(Math.abs(sample.center[0]) * width / 2, 'centre assemblage X en pixels').toBeLessThanOrEqual(2);
@@ -465,6 +480,7 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
       calls: 10,
       frame: 1,
       elapsed: 1.0,
+      opaque: 100, colors: 10, current: true,
     };
 
     // Cas nominal valide
@@ -479,6 +495,8 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
 
     // 3. Contrôle négatif frame absente
     expect(() => assertFramed({ ...validSample, calls: 0 }, MEN, 100, 100)).toThrow();
+    expect(() => assertFramed({ ...validSample, opaque: 0 }, MEN, 100, 100)).toThrow();
+    expect(() => assertFramed({ ...validSample, current: false }, MEN, 100, 100)).toThrow();
 
     // 4. Contrôle négatif hors marge (NDC > 0.8)
     const outOfMargin = JSON.parse(JSON.stringify(validSample)) as Sample;
@@ -534,10 +552,10 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
       const retained = page.getByTestId('retained-connections');
       await expect(retained).toHaveAttribute('aria-hidden', 'true');
       await expect.poll(async () => page.locator('[data-testid^="avatar-thumb-"] canvas').evaluateAll(canvases => {
-        const reader = Reflect.get(window, '__readFraming') as (canvas: Element) => Sample | null;
+        const reader = Reflect.get(window, '__readFraming') as (canvas: Element, prepared: boolean) => Sample | null;
         return canvases.length === 2 && canvases.every(canvas => {
-          const sample = reader(canvas);
-          return sample && sample.calls > 0 && sample.frameloop === 'never';
+          const sample = reader(canvas, true);
+          return sample && sample.current && sample.opaque > 10 && sample.colors > 2 && sample.calls > 0 && sample.frameloop === 'never';
         });
       }), { timeout: 45_000, message: 'Deux vrais buffers préparés, puis frameloops arrêtées hors route' }).toBe(true);
       const canvases = await page.locator('[data-testid^="avatar-thumb-"] canvas').elementHandles();
@@ -608,10 +626,13 @@ test.describe('cadrage miniatures 3D (T08/T30c/T37)', () => {
         // 1. Assert initial framing
         assertFramed(first, outfit.config, rect.width, rect.height);
 
-        // 2. Vérifier budget : entre 1 et 2 canvases actifs dans le DOM
-        const count = await page.locator('[data-testid^="avatar-thumb-"] canvas').count();
-        expect(count, 'budget thumbnails max 2 slots').toBeGreaterThanOrEqual(1);
-        expect(count, 'budget thumbnails max 2 slots').toBeLessThanOrEqual(2);
+        // All thirty presentation cells remain, with just one WebGL source.
+        await expect(page.locator('[data-testid^="avatar-thumb-"] [data-avatar-cell]')).toHaveCount(30);
+        await expect(page.locator('[data-avatar-source] canvas')).toHaveCount(1);
+        await expect.poll(() => page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-testid^="avatar-thumb-"] [data-avatar-view]')].filter(node => {
+          const r = node.getBoundingClientRect(), port = node.closest('[data-testid="connections-scrollport"]')!.getBoundingClientRect();
+          return r.bottom > port.top && r.top < port.bottom;
+        }).every(node => node.dataset.avatarState === 'frame-ready'))).toBe(true);
 
         // 3. Stabilité temporelle sur 3 frames / ticks (delta caméra nul, pose envelope stable)
         for (const moment of [500, 1000]) {

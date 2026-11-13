@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Locator } from '@playwright/test';
+import { test, expect, type Page, type Locator, type BrowserContext } from '@playwright/test';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import {
@@ -14,11 +14,13 @@ import {
 } from './support/stabilityFixtures';
 import {
   assertCleanTeardown,
+  assertAvatarPresentation,
   getStabilitySnapshot,
   installStabilityMetrics,
   teardownStabilityMetrics,
   type StabilityMetricsSnapshot,
 } from './support/stabilityMetrics';
+import { assertAvatarCandidate } from '../tests/support/avatarGraphics';
 
 const PHASE = process.env.BEERCALL_STABILITY_PHASE === 'verify' ? 'verify' : 'baseline';
 const TOTAL_CYCLES = Number(process.env.BEERCALL_STABILITY_CYCLES ?? 40);
@@ -38,6 +40,17 @@ interface StabilityWindow extends Window {
   __REACT_DEVTOOLS_GLOBAL_HOOK__?: unknown;
 }
 
+async function installSharedStabilityFixtures(context: BrowserContext) {
+  const fixture = await installStabilityFixtures(context);
+  // Static-world warmup is optional and separate from the avatar whitelist.
+  // Match only these three known requests before the strict avatar route; no
+  // game/world is opened in this suite and unknown model requests stay fatal.
+  for (const name of ['Bar.fbx', 'Swimming_pool.fbx', 'Floaty_Island.fbx']) {
+    await context.route(`**/models/${name}`, route => route.fulfill({status: 503, body: 'Optional decor preparation isolated from avatar stability'}));
+  }
+  return fixture;
+}
+
 async function centralThumbnail(page: Page, list: Locator, label: string) {
   const id = await list.evaluate(element => {
     const viewport = element.getBoundingClientRect();
@@ -52,7 +65,8 @@ async function centralThumbnail(page: Page, list: Locator, label: string) {
   expect(id, `${label} : candidat central réel`).toBeDefined();
   const canvas = page.getByTestId(id!).locator('[data-avatar-framing="ready"] canvas');
   await expect(canvas).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => canvas.evaluate(node => window.__stabilityCanvasDraws!(node as HTMLCanvasElement)), { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect.poll(() => canvas.evaluate(node => window.__stabilityCanvasCopies!(node as HTMLCanvasElement)), { timeout: 15_000 }).toBeGreaterThan(0);
+  await assertAvatarPresentation(canvas);
   const info = await canvas.evaluate(node => {
     const element = node.closest('[data-avatar-framing-info]');
     return element ? JSON.parse(element.getAttribute('data-avatar-framing-info')!) as { cpuTimeMs: number } : null;
@@ -103,17 +117,16 @@ async function waitForDashboard(page: Page) {
     () => mapCanvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)),
     { timeout: 30_000, message: 'La carte doit soumettre au moins une frame WebGL' },
   ).toBeGreaterThan(0);
-  await expect.poll(
-    () => page.evaluate(() => Boolean(window.__beercall_scene_metrics?.avatarFrameSubmitted)),
-    { timeout: 30_000, message: 'Le joueur doit soumettre une frame réelle' },
-  ).toBe(true);
+  const player = page.locator('[data-avatar-view-name="dashboard"] [data-avatar-cell]');
+  await expect(player.locator('..')).toHaveAttribute('data-avatar-state', 'frame-ready', {timeout: 30_000});
+  await assertAvatarPresentation(player);
   return mapCanvas;
 }
 
 async function openConnections(page: Page) {
   await page.getByRole('button', { name: 'Connexions' }).click();
   await expect(page.getByRole('heading', { name: 'Connexions' })).toBeVisible({ timeout: 15_000 });
-  const list = page.locator('div.flex-1.overflow-y-auto').first();
+  const list = page.getByTestId('connections-scrollport');
   await expect(list).toBeVisible();
   return list;
 }
@@ -127,6 +140,7 @@ async function backToDashboard(page: Page) {
 test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL-01)', () => {
   test('banc SPA 40 cycles sans rechargement de document', async ({ context, page }) => {
     test.setTimeout(900_000);
+    await assertAvatarCandidate();
     await installStabilityMetrics(page);
 
     try {
@@ -180,20 +194,20 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         w.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
       });
 
-      const fixture = await installStabilityFixtures(context);
+      const fixture = await installSharedStabilityFixtures(context);
       await page.goto('/');
       await page.waitForLoadState('domcontentloaded');
       const mapCanvas = await waitForDashboard(page);
       const mapHandle = await mapCanvas.elementHandle();
       expect(mapHandle).not.toBeNull();
-      const playerCanvas = page.locator('[data-testid="retained-dashboard"] [data-testid="safe-avatar-container"] canvas').first();
+      const playerCanvas = page.locator('[data-testid="retained-dashboard"] [data-avatar-cell]').first();
       await expect(playerCanvas).toBeVisible();
-      await expect.poll(() => playerCanvas.evaluate(canvas => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement))).toBeGreaterThan(0);
+      await expect.poll(() => playerCanvas.evaluate(canvas => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement))).toBeGreaterThan(0);
       const playerHandle = await playerCanvas.elementHandle();
       expect(playerHandle).not.toBeNull();
       const retainedIds = await page.evaluate(() => [
         document.querySelector('canvas[data-stability-map="map-1"]')?.getAttribute('data-stability-id'),
-        document.querySelector('[data-testid="retained-dashboard"] [data-testid="safe-avatar-container"] canvas')?.getAttribute('data-stability-id'),
+        document.querySelector('[data-avatar-source] canvas')?.getAttribute('data-stability-id'),
       ]);
       expect(retainedIds.every(Boolean) && new Set(retainedIds).size === 2).toBe(true);
 
@@ -222,7 +236,7 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         await expect.poll(async () => {
           snapshot = await getStabilitySnapshot(page);
           return snapshot.activeContexts;
-        }, { timeout: 15_000, message: `${stage} cycle ${cycle} : inventaire stabilisé≤4` }).toBeLessThanOrEqual(4);
+        }, { timeout: 15_000, message: `${stage} cycle ${cycle} : inventaire stabilisé≤3` }).toBeLessThanOrEqual(3);
         if (cycle > WARMUP_CYCLES) checkpoints.push({ cycle, stage, activeContexts: snapshot.activeContexts, snapshot });
         return snapshot;
       };
@@ -254,7 +268,7 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         const thumbnails = page.locator('[data-testid^="avatar-thumb-"]');
         await expect(thumbnails).toHaveCount(30, { timeout: 15_000 });
 
-        const list = page.locator('div.flex-1.overflow-y-auto').first();
+        const list = page.getByTestId('connections-scrollport');
         const entry = await centralThumbnail(page, list, `Entrée cycle ${cycle}`);
         await checkpoint(cycle, 'list_entry');
 
@@ -263,25 +277,28 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
         await expect(item30).toBeInViewport();
         const bottom = await centralThumbnail(page, list, `Bas cycle ${cycle}`);
-        const bottomDraws = await bottom.canvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement));
+        const bottomDraws = await bottom.canvas.evaluate((canvas) => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement));
         assertFrames(bottomDraws, `Miniature bas cycle ${cycle}`);
         await checkpoint(cycle, 'bottom');
 
-        // 3. Remonter jusqu'au premier écran, rendu admis 1..2
+        // 3. Remonter : toutes les présentations visibles, source GPU unique.
         const item1 = thumbnails.nth(0);
         await list.evaluate(node => { node.scrollTop = 0; });
         await expect(item1).toBeInViewport();
         const top = await centralThumbnail(page, list, `Haut cycle ${cycle}`);
-        const topReadyCount = await list.locator('[data-avatar-framing="ready"] canvas').count();
-        expect(topReadyCount, 'Rendu admis 1..2 au premier écran').toBeGreaterThanOrEqual(1);
-        expect(topReadyCount, 'Rendu admis 1..2 au premier écran').toBeLessThanOrEqual(2);
-        const topDraws = await top.canvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement));
+        await expect.poll(() => list.evaluate(element => {
+          const bounds = element.getBoundingClientRect();
+          const cells = [...element.querySelectorAll<HTMLElement>('[data-avatar-view]')].filter(node => {const r = node.getBoundingClientRect(); return r.bottom > bounds.top && r.top < bounds.bottom;});
+          return cells.length >= 3 && cells.every(node => node.dataset.avatarState === 'frame-ready');
+        })).toBe(true);
+        await expect(page.locator('[data-avatar-source] canvas')).toHaveCount(1);
+        const topDraws = await top.canvas.evaluate((canvas) => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement));
         assertFrames(topDraws, `Miniature haut cycle ${cycle}`);
         await checkpoint(cycle, 'top');
 
         // 4. Observer compteurs carte et joueur avant retour
         const mapDrawsBeforeReturn = await mapCanvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement));
-        const playerDrawsBeforeReturn = await playerHandle!.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement));
+        const playerDrawsBeforeReturn = await playerHandle!.evaluate((canvas) => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement));
 
         // 5. Simulation visibility passage masqué / retour distinct
         let backgroundReturn = false;
@@ -303,19 +320,20 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         await expect(page.locator('canvas[data-stability-map="map-1"]')).toHaveCount(1);
         await expect(playerCanvas).toBeVisible({ timeout: 15_000 });
         expect(await mapHandle!.evaluate(canvas => canvas.isConnected && canvas === document.querySelector('canvas[data-stability-map="map-1"]'))).toBe(true);
-        expect(await playerHandle!.evaluate(canvas => canvas.isConnected && canvas === document.querySelector('[data-testid="retained-dashboard"] [data-testid="safe-avatar-container"] canvas'))).toBe(true);
+        expect(await playerHandle!.evaluate(canvas => canvas.isConnected && canvas === document.querySelector('[data-testid="retained-dashboard"] [data-avatar-cell]'))).toBe(true);
         await expect.poll(() => mapHandle!.evaluate(canvas => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)), { timeout: 15_000 }).toBeGreaterThan(mapDrawsBeforeReturn);
-        await expect.poll(() => playerHandle!.evaluate(canvas => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)), { timeout: 15_000 }).toBeGreaterThan(playerDrawsBeforeReturn);
+        await expect.poll(() => playerHandle!.evaluate(canvas => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement)), { timeout: 15_000 }).toBeGreaterThan(playerDrawsBeforeReturn);
+        await assertAvatarPresentation(playerCanvas);
         const mapDrawsAfter = await mapCanvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement));
         expect(mapDrawsAfter, `Progression carte cycle ${cycle}`).toBeGreaterThan(mapDrawsBeforeReturn);
 
         await expect.poll(
           () => page.evaluate((after) => {
             const signals = (window as unknown as { __beercall_scene_metrics?: Record<string, { view?: string; generation?: number; timestamp?: number; drawCalls?: number }> }).__beercall_scene_metrics;
-            const s = signals?.avatarFrameSubmitted, map = signals?.mapInteractive;
-            return Boolean(s && map && s.view === 'dashboard' && Number(s.generation) > 0 && s.generation === map.generation && Number(s.timestamp) > after && Number(map.timestamp) > after && Number(s.drawCalls) > 0);
+            const map = signals?.mapInteractive;
+            return Boolean(map && Number(map.generation) > 0 && Number(map.timestamp) > after);
           }, beforeReturn),
-          { timeout: 15_000, message: `Preuve joueur courant generation valide cycle ${cycle}` },
+          { timeout: 15_000, message: `Carte interactive après retour cycle ${cycle}, joueur vérifié par son certificat propre` },
         ).toBe(true);
 
         await page.screenshot({ path: resolve(resultsDir, `stability-${PHASE}-return-cycle-${cycle}.png`) });
@@ -355,7 +373,7 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
       const finalMetrics = await getStabilitySnapshot(page);
       const activeContexts = finalMetrics.activeContexts;
       assertBoundedGrowth(afterWarmup, finalMetrics.contextsCreated, TOTAL_CYCLES - WARMUP_CYCLES);
-      assertContextInventory(checkpoints);
+      assertContextInventory(checkpoints, {maxActive: 3});
       const dom = await page.evaluate(() => ({
         retainedDashboard: document.querySelectorAll('[data-testid="retained-dashboard"]').length,
         canvases: Array.from(document.querySelectorAll('canvas')).map(canvas => ({
@@ -393,7 +411,7 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
       await mkdir(dirname(output), { recursive: true });
       await writeFile(output, JSON.stringify(summary, null, 2));
 
-      expect(activeContexts, 'Contextes WebGL actifs bornés après échauffement').toBeLessThanOrEqual(4);
+      expect(activeContexts, 'Contextes WebGL actifs bornés après échauffement').toBeLessThanOrEqual(3);
 
       if (PHASE === 'verify') {
         expect(webglWarnings).toHaveLength(0);
@@ -433,21 +451,26 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
 
   test('perte/restauration volontaire — avatar Profil', async ({ context, page }) => {
     test.setTimeout(120_000);
+    await assertAvatarCandidate();
     await installStabilityMetrics(page);
 
     try {
-      const fixture = await installStabilityFixtures(context);
+      const fixture = await installSharedStabilityFixtures(context);
       await page.goto('/profile');
       await page.waitForLoadState('domcontentloaded');
 
-      const avatarCanvas = page.locator('div[data-testid="safe-avatar-container"] canvas').first();
+      const avatarCanvas = page.locator('[data-avatar-view-name="profile"] [data-avatar-cell]');
       await expect(avatarCanvas).toBeVisible({ timeout: 30_000 });
       await expect.poll(
-        () => avatarCanvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)),
+        () => avatarCanvas.evaluate((canvas) => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement)),
         { timeout: 30_000 },
       ).toBeGreaterThan(0);
 
-      const result = await loseAndRestore(avatarCanvas);
+      await expect(avatarCanvas.locator('..')).toHaveAttribute('data-avatar-state', 'frame-ready');
+      await assertAvatarPresentation(avatarCanvas);
+      const copiesBefore = await avatarCanvas.evaluate(canvas => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement));
+      const source = page.locator('[data-avatar-source] canvas');
+      const result = await loseAndRestore(source);
 
       if (!result.available) {
         test.info().annotations.push({ type: 'non mesuré', description: result.reason });
@@ -461,11 +484,14 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
         expect(result.contextRestored?.id).toBe(result.contextBefore?.id);
         expect(result.contextLost?.status).toBe('lost');
         expect(result.contextRestored?.status).toBe('restored');
-        await expect(page.locator('div[data-testid="safe-avatar-container"] canvas')).toHaveCount(1);
+        await expect(page.locator('[data-avatar-source] canvas')).toHaveCount(1);
         await expect.poll(
-          () => avatarCanvas.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)),
+          () => source.evaluate((canvas) => window.__stabilityCanvasDraws!(canvas as HTMLCanvasElement)),
           { timeout: 15_000 },
         ).toBeGreaterThan(result.drawsAtRestored);
+        await expect.poll(() => avatarCanvas.evaluate(canvas => window.__stabilityCanvasCopies!(canvas as HTMLCanvasElement))).toBeGreaterThan(copiesBefore);
+        await expect(avatarCanvas.locator('..')).toHaveAttribute('data-avatar-state', 'frame-ready');
+        await assertAvatarPresentation(avatarCanvas);
         // État HTML seulement fermé après frame/idle correct
         await expect(page.locator('[role="status"][aria-label="Contexte WebGL perdu"]')).toHaveCount(0);
         await expect(page.locator('[role="status"][aria-label="Restauration de l\'affichage"]')).toHaveCount(0);
@@ -482,11 +508,12 @@ test.describe('Stabilité 3D réelle — 30 connexions et carte retenue (T20/REL
 
   test('perte/restauration volontaire — carte MapLibre', async ({ context, page }) => {
     test.setTimeout(120_000);
+    await assertAvatarCandidate();
     await installStabilityMetrics(page);
 
     try {
       page.on('pageerror', (error) => console.log('[T20 MapLibre pageerror]', error.stack ?? error.message));
-      const fixture = await installStabilityFixtures(context);
+      const fixture = await installSharedStabilityFixtures(context);
       await page.goto('/');
       await page.waitForLoadState('domcontentloaded');
 

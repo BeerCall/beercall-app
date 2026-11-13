@@ -1,0 +1,54 @@
+name: Update submodule gitlink
+
+on:
+  repository_dispatch:
+    types: [submodule-updated]
+
+# Writes use the dedicated PAT, so that PR checks actually run.
+permissions:
+  contents: read
+
+# Serialize each module independently; unrelated dispatches must not displace
+# each other in GitHub's single pending concurrency slot.
+concurrency:
+  group: submodule-${{ github.event.client_payload.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update submodule gitlink
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate dispatch payload
+        env:
+          SUBMODULE: ${{ github.event.client_payload.repository }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          SOURCE_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          case "$SUBMODULE" in
+            beercall-frontend|beercall-backend) ;;
+            *) echo "Sous-module non autorisé"; exit 1 ;;
+          esac
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_REF" == main ]] || exit 1
+
+      - name: Checkout current production branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.SUBMODULE_DISPATCH_TOKEN }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Test gitlink updater offline
+        run: python3 -B -m unittest discover -s scripts/tests -p test_update_submodule.py -v
+
+      - name: Update gitlink and enable protected auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.SUBMODULE_DISPATCH_TOKEN }}
+          SUBMODULE: ${{ github.event.client_payload.repository }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          SOURCE_REF: ${{ github.event.client_payload.ref }}
+        run: python3 scripts/update_submodule.py

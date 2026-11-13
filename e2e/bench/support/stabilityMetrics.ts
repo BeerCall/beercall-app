@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Page, type Locator } from '@playwright/test';
 
 export type ContextStatus = 'live' | 'lost' | 'restored';
 
@@ -30,6 +30,8 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
     let nextCanvasId = 0;
     const cleanups: Array<() => void> = [];
     const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    const originalDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+    const canvasCopies = new WeakMap<HTMLCanvasElement, number>();
     const originalDrawMethods: Array<{ proto: object; method: string; orig: Function }> = [];
 
     interface InternalTrackedEntry {
@@ -79,6 +81,15 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
     };
 
     window.__stabilityCanvasDraws = (canvas: HTMLCanvasElement) => canvasDraws.get(canvas) ?? 0;
+    window.__stabilityCanvasCopies = canvas => canvasCopies.get(canvas) ?? 0;
+    CanvasRenderingContext2D.prototype.drawImage = function(this: CanvasRenderingContext2D, ...args: unknown[]) {
+      const result = Reflect.apply(originalDrawImage, this, args);
+      if (this.canvas.matches('[data-avatar-cell]')) {
+        if (!this.canvas.hasAttribute('data-stability-id')) this.canvas.setAttribute('data-stability-id', `cell_${++nextCanvasId}`);
+        canvasCopies.set(this.canvas, (canvasCopies.get(this.canvas) ?? 0) + 1);
+      }
+      return result;
+    } as typeof originalDrawImage;
 
     HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args: unknown[]) {
       const context = Reflect.apply(originalGetContext, this, args) as RenderingContext | null;
@@ -193,6 +204,7 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
 
     window.__teardownStabilityMetrics = () => {
       HTMLCanvasElement.prototype.getContext = originalGetContext;
+      CanvasRenderingContext2D.prototype.drawImage = originalDrawImage;
       for (const { proto, method, orig } of originalDrawMethods) {
         (proto as Record<string, unknown>)[method] = orig;
       }
@@ -201,6 +213,7 @@ export async function installStabilityMetrics(page: Page): Promise<void> {
       delete (document as unknown as { hidden?: boolean }).hidden;
       delete window.__stabilityMetrics;
       delete window.__stabilityCanvasDraws;
+      delete window.__stabilityCanvasCopies;
       delete window.__stabilitySetDocumentHidden;
       delete window.__getStabilitySnapshot;
       delete window.__stabilityIsPatched;
@@ -242,6 +255,7 @@ export async function assertCleanTeardown(page: Page): Promise<void> {
     if (window.__stabilityCanvasDraws !== undefined) {
       problems.push('window.__stabilityCanvasDraws toujours présent');
     }
+    if (window.__stabilityCanvasCopies !== undefined) problems.push('window.__stabilityCanvasCopies toujours présent');
     if (window.__stabilitySetDocumentHidden !== undefined) {
       problems.push('window.__stabilitySetDocumentHidden toujours présent');
     }
@@ -272,10 +286,41 @@ declare global {
       readonly activeContexts: number;
     };
     __stabilityCanvasDraws?: (canvas: HTMLCanvasElement) => number;
+    __stabilityCanvasCopies?: (canvas: HTMLCanvasElement) => number;
     __stabilitySetDocumentHidden?: (hidden: boolean) => boolean;
     __getStabilitySnapshot?: () => StabilityMetricsSnapshot;
     __stabilityIsPatched?: () => boolean;
     __teardownStabilityMetrics?: () => void;
     __beercall_scene_metrics?: Record<string, { drawCalls?: number; timestamp?: number; frames?: number }>;
   }
+}
+
+/** Prove this 2D cell's own scene/copy, never a neighbour's WebGL calls. */
+export async function assertAvatarPresentation(canvas: Locator) {
+  const proof = await canvas.evaluate(element => {
+    const cell = element as HTMLCanvasElement;
+    type Group = {traverse(callback: (node: {isMesh?: boolean; visible: boolean}) => void): void};
+    type Registry = {generation: number; getSnapshot(): {views: {id: string; jobId: string; signature: string; frame?: {signature: string; generation: number; drawCalls: number}}[]; jobs: {id: string; ready: boolean; group?: Group}[]}};
+    type Fiber = {return?: Fiber; memoizedProps?: {value?: {registry?: Registry}; session?: {registry?: Registry}}};
+    const key = Object.keys(cell).find(key => key.startsWith('__reactFiber$'));
+    let fiber = key ? (cell as unknown as Record<string, Fiber>)[key] : undefined;
+    let registry: Registry | undefined;
+    while (fiber) {registry = (fiber.memoizedProps?.value ?? fiber.memoizedProps?.session)?.registry; if (registry) break; fiber = fiber.return;}
+    const snapshot = registry?.getSnapshot();
+    const id = cell.closest<HTMLElement>('[data-avatar-view]')?.dataset.avatarView;
+    const view = snapshot?.views.find(view => view.id === id);
+    const job = snapshot?.jobs.find(job => job.id === view?.jobId);
+    let meshes = 0; job?.group?.traverse(node => {if (node.isMesh && node.visible) meshes++;});
+    const scratch = document.createElement('canvas'); scratch.width = cell.width; scratch.height = cell.height;
+    const context = scratch.getContext('2d', {willReadFrequently: true}); context?.drawImage(cell, 0, 0);
+    const pixels = context?.getImageData(0, 0, scratch.width, scratch.height).data;
+    let opaque = 0; const colors = new Set<string>();
+    if (pixels) for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] > 0) {opaque++; colors.add(`${pixels[i] >> 4}:${pixels[i + 1] >> 4}:${pixels[i + 2] >> 4}`);}
+    return {current: !!view?.frame && view.frame.signature === view.signature && view.frame.generation === registry?.generation,
+      ready: !!job?.ready, meshes, calls: view?.frame?.drawCalls ?? 0, copies: window.__stabilityCanvasCopies?.(cell) ?? 0, opaque, colors: colors.size};
+  });
+  expect(proof.current).toBe(true); expect(proof.ready).toBe(true); expect(proof.meshes).toBeGreaterThan(0);
+  expect(proof.calls).toBeGreaterThan(0); expect(proof.copies).toBeGreaterThan(0);
+  expect(proof.opaque).toBeGreaterThan(10); expect(proof.colors).toBeGreaterThan(2);
+  return proof;
 }

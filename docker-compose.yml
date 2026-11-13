@@ -68,6 +68,53 @@ services:
     networks:
       - default
 
+  # --- AVATAR SPRITES RENDERER & WORKER ---
+  avatar-renderer:
+    build:
+      context: ./beercall-frontend
+      dockerfile: tools/avatar-renderer/Dockerfile
+    restart: unless-stopped
+    shm_size: '1gb'
+    mem_limit: 1536m
+    volumes:
+      - ./beercall-backend/static/models:/models:ro
+      - ./beercall-frontend/public/animations:/animations:ro
+    environment:
+      - PORT=8787
+      - HOST=0.0.0.0
+      - MODELS_DIR=/models
+      - ANIMATIONS_DIR=/animations
+      - RENDERER_SOFTWARE_GL=1
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - default
+
+  avatar-sprite-worker:
+    build: ./beercall-backend
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      avatar-renderer:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db_beercall:5432/${DB_NAME}
+      - BEERCALL_SECRET_KEY=${BEERCALL_SECRET_KEY:?required}
+      - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH:-}
+      - AVATAR_RENDERER_URL=http://avatar-renderer:8787
+      - AVATAR_SPRITES_ENABLED=true
+    volumes:
+      - ./beercall-backend/uploads:/app/uploads
+      - ./secrets:/run/secrets:ro
+    command: ["python", "-m", "workers.avatar_sprite_worker"]
+    networks:
+      - default
+
   # --- BACKEND ---
   backend:
     build: ./beercall-backend
@@ -111,6 +158,8 @@ services:
         - VITE_FIREBASE_APP_ID=${VITE_FIREBASE_APP_ID}
         - VITE_FIREBASE_DATABASE_URL=${VITE_FIREBASE_DATABASE_URL}
         - VITE_FIREBASE_VAPID_KEY=${VITE_FIREBASE_VAPID_KEY}
+        - VITE_FF_GLB_AVATAR=${VITE_FF_GLB_AVATAR:-1}
+        - VITE_FF_GLB_WORLDS=${VITE_FF_GLB_WORLDS:-1}
     container_name: beercall_frontend
     restart: always
     expose:

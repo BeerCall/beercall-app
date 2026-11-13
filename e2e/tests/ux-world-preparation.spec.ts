@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fixtureCall, installUxFixtures } from './support/uxFixtures';
+import { assertAvatarCandidate, installAvatarGraphics } from './support/avatarGraphics';
 
 const backendWorkspace = process.env.BEERCALL_WORKSPACE_BACKEND ?? resolve(process.cwd(), '../beercall-backend');
 
@@ -10,6 +11,9 @@ const models = ['Bar.fbx', 'Swimming_pool.fbx', 'Floaty_Island.fbx'];
 
 test('trois décors préparés sans Canvas ni jeu, puis une seule scène visible avec vraie frame', async ({ context, page }, info) => {
   test.setTimeout(90_000);
+  await assertAvatarCandidate();
+  await installAvatarGraphics(context);
+  try {
   const prepared = process.env.BEERCALL_EXPECT_WORLD_WARMUP === '1';
   const isolation = await installUxFixtures(context, {
     assets: true,
@@ -56,7 +60,10 @@ test('trois décors préparés sans Canvas ni jeu, puis une seule scène visible
     expect([...hits.keys()].sort()).toEqual([...models].sort());
   }
   expect(gameRequests, 'No game queries, actions or starts while preparing static resources').toEqual([]);
-  expect(await page.locator('canvas').count(), 'Preparation never creates a world Canvas').toBe(1);
+  // This fixture has no player/contact avatar: no avatar source is demanded.
+  await expect.poll(() => page.evaluate(() => window.__avatarGraphics.metrics().live)).toBe(1);
+  expect(await page.evaluate(() => window.__avatarGraphics.metrics().sources), 'no eager avatar GPU source without avatar demand').toBe(0);
+  await expect(page.locator('[data-world-canvas] canvas'), 'Preparation never creates a world Canvas').toHaveCount(0);
   await page.getByRole('button', { name: /Mondes/ }).tap();
   for (const tab of ['bar', 'piscine', 'dodo']) {
     if (tab !== 'bar') await page.getByRole('button', { name: tab, exact: true }).tap();
@@ -64,8 +71,10 @@ test('trois décors préparés sans Canvas ni jeu, puis une seule scène visible
       const timings = Reflect.get(window, '__worldPreparationTimings') as { frames: { tab: string }[] };
       return timings.frames.some(frame => frame.tab === tabName);
     }, tab);
-    await expect(page.locator('canvas')).toHaveCount(2); // retained map + one world
-    if (prepared) await expect(page.locator('[data-world-canvas] canvas')).toHaveCount(1);
+    await expect(page.locator('[data-world-canvas] canvas')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => window.__avatarGraphics.metrics().live)).toBeLessThanOrEqual(3);
+    expect(await page.evaluate(() => window.__avatarGraphics.metrics().sources)).toBe(0);
+    await expect.poll(() => page.evaluate(() => window.__avatarGraphics.metrics().live)).toBe(2);
   }
   expect([...hits.values()], 'Warm-up and actual worlds reuse a single decoded resource per model').toEqual([1, 1, 1]);
   expect(gameRequests.every(request => request === 'GET /api/aperos/900001/game/state')).toBe(true);
@@ -74,4 +83,5 @@ test('trois décors préparés sans Canvas ni jeu, puis une seule scène visible
   await info.attach('world-preparation-timings', { body: JSON.stringify({ prepared, timings,
     scope: 'Chromium local; frame submission, not physical iPhone display; dynamic participants/GPU compilation are not precreated' }), contentType: 'application/json' });
   isolation.assertIsolated();
+  } finally {await page.evaluate(() => window.__avatarGraphics.cleanup()).catch(() => {});}
 });
