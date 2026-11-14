@@ -12,7 +12,9 @@ import run_release_e2e as harness
 
 
 class ReleaseRecipeTests(unittest.TestCase):
-    def result_report(self, out, count=39):
+    def result_report(self, out, count=None):
+        if count is None:
+            count = harness.RELEASE_SCENARIOS
         test = {"expectedStatus": "passed", "status": "expected",
                 "results": [{"status": "passed"}]}
         data = {"errors": [], "suites": [{"suites": [{"specs": [
@@ -22,7 +24,7 @@ class ReleaseRecipeTests(unittest.TestCase):
         report.write_text(json.dumps(data), encoding="utf-8")
         return report, data
 
-    def test_results_require_39_real_passes(self):
+    def test_results_require_the_locked_number_of_real_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             report, _ = self.result_report(Path(tmp))
             harness.verify_results(report)
@@ -42,7 +44,7 @@ class ReleaseRecipeTests(unittest.TestCase):
                     report.write_text(json.dumps(data), encoding="utf-8")
                     with self.assertRaises(ValueError):
                         harness.verify_results(report)
-            for count in (0, 38, 40):
+            for count in (0, harness.RELEASE_SCENARIOS - 1, harness.RELEASE_SCENARIOS + 1):
                 report, _ = self.result_report(Path(tmp), count)
                 with self.assertRaises(ValueError):
                     harness.verify_results(report)

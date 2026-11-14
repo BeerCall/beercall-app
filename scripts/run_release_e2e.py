@@ -1,4 +1,4 @@
-"""Run the current 39 browser scenarios on a disposable, instrumented release.
+"""Run the current 44 browser scenarios on a disposable, instrumented release.
 
 Never uses production credentials, bind-mounted uploads or the personal demo DB.
 Coverage scopes are those of the existing frontend report scripts, unchanged.
@@ -15,7 +15,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 # Current release recipe: the fluidite suite without the world-probe measurements.
-RELEASE_SCENARIOS = 39
+RELEASE_SCENARIOS = 44
 EXCLUDED_SPECS = {"world-probe.spec.ts"}
 
 
@@ -66,7 +66,7 @@ def release_specs(frontend):
 
 
 def lock_recipe(frontend, specs, env):
-    """Fail before running if the recipe no longer contains exactly 39 scenarios."""
+    """Fail before running if the recipe no longer contains the locked scenario count."""
     args = [spec.relative_to(frontend).as_posix() for spec in specs]
     listed = subprocess.check_output(
         playwright_test(frontend, "--list", *args),
@@ -99,7 +99,7 @@ def verify_results(report):
         results = test.get("results", [])
         if (test.get("expectedStatus") != "passed" or test.get("status") != "expected"
                 or len(results) != 1 or results[0].get("status") != "passed"):
-            raise ValueError("Les 39 scénarios doivent réussir sans skip, échec attendu ni retry")
+            raise ValueError(f"Les {RELEASE_SCENARIOS} scénarios doivent réussir sans skip, échec attendu ni retry")
     print(f"RELEASE RESULTS VERIFIED: {len(tests)} scénarios réussis", flush=True)
 
 
