@@ -1,4 +1,4 @@
-"""Run the current 44 browser scenarios on a disposable, instrumented release.
+"""Run the current 51 browser scenarios on a disposable, instrumented release.
 
 Never uses production credentials, bind-mounted uploads or the personal demo DB.
 Coverage scopes are those of the existing frontend report scripts, unchanged.
@@ -15,7 +15,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 # Current release recipe: the fluidite suite without the world-probe measurements.
-RELEASE_SCENARIOS = 44
+# 44 historical scenarios + 7 isolated apéro-grouping scenarios (14c-1).
+RELEASE_SCENARIOS = 51
 EXCLUDED_SPECS = {"world-probe.spec.ts"}
 
 

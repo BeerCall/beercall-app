@@ -24,6 +24,11 @@ class ReleaseRecipeTests(unittest.TestCase):
         report.write_text(json.dumps(data), encoding="utf-8")
         return report, data
 
+    def test_recipe_locks_the_extended_grouping_scenarios(self):
+        # Le verrou est explicite : 44 scénarios historiques + 7 du lot 14c-1.
+        self.assertEqual(harness.RELEASE_SCENARIOS, 51)
+        self.assertNotIn("apero-groups.spec.ts", harness.EXCLUDED_SPECS)
+
     def test_results_require_the_locked_number_of_real_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             report, _ = self.result_report(Path(tmp))
