@@ -12,6 +12,26 @@ import secrets
 import socket
 import subprocess
 import sys
+import threading
+import time
+
+DEADLINE = None
+
+def enough_host_memory():
+    if os.name != "nt":
+        return True
+    import ctypes
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                    ("total", ctypes.c_ulonglong), ("available", ctypes.c_ulonglong),
+                    ("page_total", ctypes.c_ulonglong), ("page_available", ctypes.c_ulonglong),
+                    ("virtual_total", ctypes.c_ulonglong), ("virtual_available", ctypes.c_ulonglong),
+                    ("extended", ctypes.c_ulonglong)]
+    state = MemoryStatus()
+    state.length = ctypes.sizeof(state)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+        raise OSError("Cannot read available host memory")
+    return state.available >= 768 * 1024 * 1024
 
 ROOT = Path(__file__).resolve().parents[1]
 # Current release recipe: the fluidite suite without the world-probe measurements.
@@ -22,7 +42,31 @@ EXCLUDED_SPECS = {"world-probe.spec.ts"}
 
 def command(args, **kwargs):
     print("+", " ".join(map(str, args)), flush=True)
-    return subprocess.run(list(map(str, args)), check=True, **kwargs)
+    timeout = max(1, DEADLINE - time.monotonic()) if DEADLINE else 120
+    process = subprocess.Popen(list(map(str, args)), **kwargs)
+    try:
+        expires = time.monotonic() + timeout
+        while True:
+            if DEADLINE and not enough_host_memory():
+                raise MemoryError("Available PC memory below 768 MiB: aborting isolated E2E load")
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            try:
+                code = process.wait(timeout=min(1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=10)
+        else:
+            process.kill()
+        process.wait(timeout=10)
+        raise
+    if code:
+        raise subprocess.CalledProcessError(code, args)
+    return subprocess.CompletedProcess(args, code)
 
 
 def playwright_cli(frontend):
@@ -132,6 +176,8 @@ def run_recipe_and_reports(frontend, specs, env, compose, out):
 
 def cleanup(compose, env, out, config, failed):
     """Try every cleanup step; retain the original failure and always remove keys."""
+    global DEADLINE
+    DEADLINE = None  # Cleanup gets its own bounded commands even after deadline.
     errors = []
     try:
         try:
@@ -152,10 +198,32 @@ def cleanup(compose, env, out, config, failed):
 
 
 def main():
+    global DEADLINE
+    if os.name == "nt":
+        # Children (Playwright/Chromium) inherit two logical CPUs and low priority.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.windll.kernel32
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+        kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        handle = kernel.GetCurrentProcess()
+        mask = (1 << min(2, os.cpu_count() or 1)) - 1
+        if not kernel.SetProcessAffinityMask(handle, mask) or not kernel.SetPriorityClass(handle, 0x4000):
+            raise OSError("Cannot bound E2E host CPU affinity/priority")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--port", type=int, default=5181)
+    parser.add_argument("--backend-image", help="Already-qualified local image; caller must prove source identity")
+    parser.add_argument("--frontend-image", help="Instrumented local image; caller must prove source identity")
+    parser.add_argument("--renderer-image", help="Pinned local renderer image, no rebuild")
+    parser.add_argument("--frontend-build", type=Path, help="Fresh instrumented build to serve read-only on the isolated frontend")
+    parser.add_argument("--preparation-seconds", type=int, default=300)
     args = parser.parse_args()
+    if not 1 <= args.preparation_seconds <= 300:
+        raise ValueError("Preparation budget must be between 1 and 300 seconds")
+    if args.frontend_build and not (args.frontend_build / "index.html").is_file():
+        raise ValueError("Fresh frontend build missing index.html")
     if not 1024 <= args.port <= 65535:
         raise ValueError("An unprivileged loopback port is required")
     with socket.socket() as probe:
@@ -164,6 +232,7 @@ def main():
     if out.exists():
         raise ValueError("Output must be new: stale coverage must never be reused")
     out.mkdir(parents=True)
+    DEADLINE = time.monotonic() + args.preparation_seconds + 900
     for name in ["backend-raw", "front-raw", "sw-build", "playwright"]:
         (out / name).mkdir(mode=0o777)
         (out / name).chmod(0o777)
@@ -192,6 +261,20 @@ def main():
     for name, service in services.items():
         service.pop("container_name", None)
         service["restart"] = "no"
+        # Bound all services, not only the GPU renderer.
+        service["cpus"] = 0.25
+        service["mem_limit"] = "192m"
+        if name == "db_beercall":
+            service["mem_limit"] = "384m"
+        elif name == "backend":
+            service["cpus"] = 0.75
+            service["mem_limit"] = "512m"
+        elif name == "avatar-renderer":
+            service["cpus"] = 1
+            service["mem_limit"] = "768m"
+            service["shm_size"] = "256m"
+        elif name in {"frontend", "nginx_beercall"}:
+            service["mem_limit"] = "64m"
         service["labels"] = {"beercall.test": "release-e2e"}
         if name in {"migrate", "backend", "beer_worker", "daily_worker", "avatar-sprite-worker"}:
             service["image"] = project + "-backend"
@@ -221,20 +304,54 @@ def main():
             module = {"backend": "uvicorn", "beer_worker": "workers.beer_call_worker", "daily_worker": "workers.daily_checks", "avatar-sprite-worker": "workers.avatar_sprite_worker"}[name]
             service["command"] = ["python", "-m", "coverage", "run", "-m", module] + (["main:app", "--host", "0.0.0.0", "--port", "8000"] if name == "backend" else [])
             service["stop_grace_period"] = "30s"
+    for name, service in services.items():
+        image = (args.backend_image if name in {"migrate", "backend", "beer_worker", "daily_worker", "avatar-sprite-worker"}
+                 else args.frontend_image if name == "frontend"
+                 else args.renderer_image if name == "avatar-renderer" else None)
+        if image:
+            service["image"] = image
+            service.pop("build", None)
+    if args.frontend_build:
+        services["frontend"].setdefault("volumes", []).append(
+            {"type":"bind", "source":str(args.frontend_build.resolve()),
+             "target":"/usr/share/nginx/html", "read_only":True})
     config.write_text(json.dumps(base), encoding="utf-8")
     config.chmod(0o600)
     compose = ["docker", "compose", "-p", project, "-f", str(config)]
     started = False
+    guard = project + "-watchdog"
+    lease = out / "lease"
+    lease.mkdir()
+    heartbeat = lease / "heartbeat"
+    heartbeat.touch()
+    done = threading.Event()
+    def renew():
+        while not done.wait(3):
+            heartbeat.touch()
+    threading.Thread(target=renew, daemon=True).start()
     try:
+        # Independent from the host command tree: cancellation cannot leave
+        # CPU/GPU containers running indefinitely. Socket use is confined to
+        # the validated random project label by the mounted guard program.
+        command(["docker", "run", "-d", "--rm", "--name", guard,
+                 "--network", "none", "--cpus", "0.05", "--memory", "64m",
+                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                 "-v", str(lease) + ":/lease:ro",
+                 "-v", str(ROOT / "scripts/e2e_watchdog.py") + ":/guard.py:ro",
+                 "python:3.13-slim", "python", "-u", "/guard.py", project], env=env)
         started = True
-        command([*compose, "build", "migrate", "frontend", "avatar-renderer"], env=env)
+        builds = [name for name in ["migrate", "frontend", "avatar-renderer"] if "build" in services[name]]
+        if builds:
+            command([*compose, "build", *builds], env=env)
         # Initialise le volume uploads depuis l'image avant le demarrage
         # concurrent des services qui le montent (course Docker mkdir/aperos).
         command([*compose, "run", "--rm", "--no-deps", "-T", "backend",
                  "python", "-c", "print('uploads volume ready')"], env=env)
         command([*compose, "up", "-d", "--wait", "--wait-timeout", "240"], env=env)
         cid = subprocess.check_output([*compose, "ps", "-q", "backend"], env=env, text=True).strip()
-        command([*compose, "exec", "-T", "backend", "python", "scripts/seed_fluidite_demo.py"], env=env)
+        # Also updates a reused image's fixture, never its application modules.
+        command(["docker", "cp", backend / "scripts/seed_fluidite_demo.py", cid + ":/app/scripts/seed_fluidite_demo.py"], env=env)
+        command([*compose, "exec", "-T", "backend", "python", "scripts/seed_fluidite_demo.py", "--compact"], env=env)
         command([*compose, "exec", "-T", "backend", "python", "-c",
                  "from db.database import SessionLocal; from models.user import User; d=SessionLocal(); d.query(User).filter(User.id==1).update({'capsules':3750}); d.commit(); d.close()"], env=env)
         front_cid = subprocess.check_output([*compose, "ps", "-q", "frontend"], env=env, text=True).strip()
@@ -246,12 +363,17 @@ def main():
         (frontend.parent / ".openchamber/screenshots").mkdir(parents=True, exist_ok=True)
         specs = release_specs(frontend)
         lock_recipe(frontend, specs, env)
+        if DEADLINE - time.monotonic() < 900:
+            raise TimeoutError("Preparation exceeded five minutes; no browser campaign started")
         run_recipe_and_reports(frontend, specs, env, compose, out)
     finally:
+        done.set()
+        heartbeat.unlink(missing_ok=True)
         if started:
             cleanup(compose, env, out, config, failed=sys.exc_info()[0] is not None)
         else:
             config.unlink(missing_ok=True)
+        subprocess.run(["docker", "rm", "-f", guard], capture_output=True, timeout=15)
 
 
 if __name__ == "__main__":
