@@ -98,7 +98,11 @@ def open_pr(module: str, target: str, branch: str, head: str) -> None:
 
 def verify_protection() -> None:
     """Fail closed on either classic protection or an effective branch ruleset."""
-    protection = api_json("repos/BeerCall/beercall-app/branches/main/protection")
+    # A token may read effective rulesets but lack Administration permission
+    # for this classic-protection endpoint (the production dispatch returned
+    # 403 here). Do not stop before checking the alternative protection.
+    # This is not a bypass: inaccessible/missing rulesets still fail closed.
+    protection = api_json("repos/BeerCall/beercall-app/branches/main/protection", allow_forbidden=True)
     if protection is not None:
         _verify_classic(protection)
         return
@@ -107,7 +111,7 @@ def verify_protection() -> None:
     raise ValueError("Aucune protection de branche effective ne protège main")
 
 
-def api_json(path: str):
+def api_json(path: str, *, allow_forbidden: bool = False):
     result = subprocess.run(
         ["gh", "api", path],
         capture_output=True,
@@ -116,6 +120,8 @@ def api_json(path: str):
     if result.returncode == 0:
         return json.loads(result.stdout)
     if "404" in result.stderr or "Branch not protected" in result.stderr:
+        return None
+    if allow_forbidden and "(HTTP 403)" in result.stderr:
         return None
     raise RuntimeError(f"API GitHub indisponible pour {path}: {result.stderr.strip()}")
 
