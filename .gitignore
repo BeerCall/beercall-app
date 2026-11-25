@@ -12,3 +12,5 @@ e2e/playwright-report/
 test-results/
 playwright-report/
 e2e-compose.log
+/.openchamber/
+/scripts/__pycache__/

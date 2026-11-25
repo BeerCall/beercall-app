@@ -133,13 +133,7 @@ must manually make both checks required on `main` after a green workflow run.
 
 ## Architecture and operations
 
-- [Components, data flows and configuration](docs/architecture.md)
-- [Release, migrations, backups, restoration and rollback](docs/operations.md)
-- [ADR: single API/relay and daily scheduler](docs/adr/0001-monolithe-workers-singleton.md)
-
-Release and backup/restore owner: **migzer**. These procedures document explicit
-human responsibilities; they do not authorize a merge, production deployment or
-destructive restoration.
+Architecture, release, backup/restore and ADR documents are externalised from this repository. The release and backup/restore owner remains **migzer**. These procedures document explicit human responsibilities; they do not authorize a merge, production deployment or destructive restoration.
 
 ## 📂 Project Structure
 
